@@ -42,9 +42,9 @@
 //    (ou diagnostics affichés) — gain au (re)chargement, aucun en direct ;
 //    trois dichotomies en double supprimées (countBetween retiré) ;
 //    emptyInts en var ; trailAdded/elementAdded retirés (appels directs).
-//    Diag 58 : code −8 (prédécesseur livré relu depuis la réserve avec
-//    source = la bougie elle-même : inatteignable sauf tableau figé différent
-//    du tableau versé, Diag 10).
+//    Diag 58 : code −8 (élément LIVRÉ, trail = 0, relu depuis la réserve avec
+//    source = la bougie elle-même — un prédécesseur de la réserve reste −7 :
+//    inatteignable sauf tableau figé différent du tableau versé, Diag 10).
 // 4. ÉCARTÉ, documenté dans le rapport d'audit (audit/BSP_v11.65.1_audit.md
 //    et audit/BSP_v11.66_corrections.md) : varip sur la réserve (sortie
 //    identique en théorie, à mesurer en A/B au profileur), POOL_MAX /
@@ -52,7 +52,13 @@
 //    propre jusqu'à l'ouverture suivante quand time_close[1] est na en
 //    direct — chacun change une décision mesurée de l'auteur.
 // SCRIPT « BSP Diag » : même fichier, DIAG_FULL = true et la section
-// DIAG-SECTION remplacée ; les correctifs 1 et 3 s'y reportent tels quels.
+// DIAG-SECTION remplacée par la sienne ; tout ce qui est hors de cette section
+// (correctifs 1, textes 2, allègements 3) s'y retrouve tel quel par copie.
+// À reporter À LA MAIN dans sa section : les libellés des Diag 55 et 58 et la
+// branche « recOffset == 1 ? -8.0 » du Diag 58 (voir
+// audit/BSP_v11.66_corrections.md). Diagnostics décochés dans le jumeau : le
+// bord n'est plus calculé sur l'historique (edgeNeeded), donc son Diag 64 n'y
+// compte plus — rien n'est tracé dans ce cas.
 // Pine non compilé ici (aucun compilateur hors TradingView) ; latence non
 // mesurée : Profiler à 21:50, puis retrait du BSP pour une clôture.
 // ============================================================================
@@ -3382,7 +3388,7 @@ plot(showDiagnostics and hasPrevBar ? (fromNeighbour ? (recByCount ? -6.0 : recF
     color = invisible, format = format.price, precision = 0, offset = -1, display = display.data_window)
 
 plot(showDiagnostics and hasPrevBar and not na(buyerPercent) and not na(lastShownTime) ? float(exactUpper - lastShownTime) : na,
-    "Diag 61 — âge de la valeur tracée pour cette bougie (ms) : sa clôture moins l'heure du tick dont vient la valeur — ou du tick qui l'a invalidée (calcul indéfini, reprise invalidée, v11.40). Près de 0 : mesure sur son dernier tick ; plus grand : ticks de fin manquants (avant la v11.46 : toute fin perdue ; depuis : fin perdue dont le prédécesseur transporté n'est pas admissible ou n'est pas arrivé pendant N+1), reprise rafraîchie ou reprise simple ; Sur une estimation (option), cet âge est synthétique : la valeur est datée de la borne stricte neighbourUpper (1 ms en frontière partagée), ou la date déjà mémorisée est conservée si cette borne ne progresse pas. Il ne mesure pas la fraîcheur d’un tick réel",
+    "Diag 61 — âge de la valeur tracée pour cette bougie (ms) : sa clôture moins l'heure du tick dont vient la valeur — ou du tick qui l'a invalidée (calcul indéfini, reprise invalidée, v11.40). Près de 0 : mesure sur son dernier tick ; plus grand : ticks de fin manquants (avant la v11.46 : toute fin perdue ; depuis : fin perdue dont le prédécesseur transporté n'est pas admissible, ou n'est arrivé ni pendant N+1 ni dans le tableau de N lui-même), reprise rafraîchie ou reprise simple ; Sur une estimation (option), cet âge est synthétique : la valeur est datée de la borne stricte neighbourUpper (1 ms en frontière partagée), ou la date déjà mémorisée est conservée si cette borne ne progresse pas. Il ne mesure pas la fraîcheur d’un tick réel",
     color = invisible, format = format.price, precision = 0, offset = -1, display = display.data_window)
 
 // [DT] DIAG-SECTION-END
