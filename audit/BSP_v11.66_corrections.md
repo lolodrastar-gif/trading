@@ -19,6 +19,28 @@ chaque boucle `for` gardée contre l'itération descendante de la v6, aucune bou
 la limite de 500 ms, arité de chaque appel, qualificateurs `simple`, paramètre `active` des
 réglages accepté en v6 depuis juillet 2025).
 
+## Vérification du diff v11.65.1 → v11.66
+
+Cinq relecteurs indépendants du diff (compilation v6, rendu par défaut et équivalence des
+réécritures, les deux correctifs et l'égalité bord/série cas par cas, contrat du script
+jumeau, relecture « à l'œil neuf » de chaque hunk), puis deux vérificateurs contradictoires
+par trouvaille :
+
+- **aucun problème de compilation, d'exécution ou de rendu** trouvé : qualificateurs
+  (`const bool` dans les conditions, `int(na)`), portée des tuples dans `if edgeNeeded`,
+  appels nus de `poolInsert`, ordre des déclarations, 11 `plot()`, 28 réglages aux mêmes
+  positions, aucune ligne à guillemets déséquilibrés, moteur identique octet pour octet ;
+- `candidateIndex` et `inBoundsCount` réécrits : prouvés équivalents dans tous les cas (y
+  compris bar 0, tableau vide, aucun élément dans les bornes) ;
+- les sept cas de la coupure stricte (tick propre indéfini, tick indéfini de la réserve
+  avec repli, reprise invalidée, reprise rafraîchie, reprise simple, estimation, mesure
+  fraîche) : bord = série pour la valeur, l'état et le remplissage ; `lastShownWarm` :
+  toujours vrai dès que `lastBuyer` existe avec « Masquer » coché (rendu par défaut
+  inchangé), estimation grise série ET bord sinon ;
+- avec `DIAG_FULL = true`, chaque calcul gardé se réduit exactement à l'ancien code ;
+- trois imprécisions de texte dans le nouvel en-tête, corrigées (consigne de report vers le
+  jumeau ; « prédécesseur » → « élément livré » pour le code −8 ; libellé du Diag 61).
+
 ## Ce qui est garanti
 
 - Moteur `bspEngine1T` et enveloppe `bspEngine1TWithTrail` : identiques octet pour octet.
