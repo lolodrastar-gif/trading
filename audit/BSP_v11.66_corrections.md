@@ -64,8 +64,9 @@ identique » précisé).
   changement de code est soit sous une option, soit une réécriture prouvée équivalente, soit
   du calcul que rien ne lit dans le script principal.
 - 11 `plot()`, 28 réglages, mêmes positions.
-- Seule différence visible par défaut : diagnostics décochés, les sept lignes « Diag » vides
-  n'apparaissent plus dans la fenêtre de données (c'était la promesse de l'info-bulle).
+- Différences visibles par défaut : en direct, la correction 0 ; et, diagnostics décochés,
+  les sept lignes « Diag » vides n'apparaissent plus dans la fenêtre de données (c'était la
+  promesse de l'info-bulle).
 
 ## Correction 0 — le direct à la milliseconde partagée (rendu par défaut)
 
@@ -76,14 +77,15 @@ la lecture différée écartait le dernier tick de N daté de la milliseconde d'
 N+1 — tick que le bord avait montré et qu'un rechargement relit (ordre de grandeur : Diag 63
 = 5 638 bougies sur 26 171 le 25/09, à l'historique ; non mesuré en direct).
 
-Correctif (lignes ~2290-2330) : verrou actif et clôture inconnue, la lecture stricte est
+Correctif (lignes ~2364-2410 pour la lecture, ~2706-2715 pour la cadence, Diag 61 dans la
+DIAG-SECTION) : verrou actif et clôture inconnue, la lecture stricte est
 **gardée** et seulement **prolongée** jusqu'à l'ouverture de N+1 incluse, sous le plafond de
 compte du bord (« premier numéro daté dès l'ouverture de N + 9 »), **et seulement si la
-tête de N est présente** (son premier numéro suit le dernier numéro connu de N−1, compté ou
-tracé) :
+tête de N est présente** (son premier numéro ne dépasse pas le dernier numéro connu de N−1
++ 1, compté ou tracé), hors première bougie de séance et hors option « plafond prudent » :
 
 ```pine
-bool liveOwnRead = hasPrevBar and blockSorted and closeIsLastTrade and not prevCloseKnown and not edgeCapPrudent
+bool liveOwnRead = hasPrevBar and blockSorted and closeIsLastTrade and not prevCloseKnown and not edgeCapPrudent and not session.isfirstbar
 int liveScan = math.min(count1, SCAN_MAX)
 int liveFirstIndex = liveOwnRead and count1 > 0 ? firstIndexAtOrAfter(times1, prevOpen) : liveScan
 int liveFirstSerial = liveOwnRead and liveFirstIndex < liveScan ? array.get(serial1, liveFirstIndex) : na
@@ -107,10 +109,21 @@ contradictoire (4 relecteurs) y a trouvé cinq défauts, tous corrigés ici :
 Le « ≈ 1 % (Diag 64) » de la première rédaction était faux : le Diag 64 exige la clôture
 connue et ne peut rien compter là où la règle s'applique.
 
-Résidus écrits dans les LIMITES : tête absente ou inconnue → recul d'un tick comme avant ;
-plus de dix ticks pour une bougie (Diag 48, fin de séance) → le plafond peut admettre un tick
-de N+1 daté de son ouverture ; le tick lu à la milliseconde partagée reste hors des bornes de
-contrôle et la couverture (Diag 41/44, script Diag) le compte manquant en tête de N+1.
+Seconde vérification (3 relecteurs) sur la version gardée : « jamais en deçà » prouvé,
+historique identique, cadence exacte ; un défaut de plus corrigé — la dernière bougie d'une
+séance peut compter moins de dix ticks, le plafond débordait alors sur la séance suivante
+et le tick pris réarmait la garde aux bougies suivantes → `not session.isfirstbar` ; et
+`staleData` n'est plus vrai sur une bougie lue (Diag 17, script Diag).
+
+Résidus écrits dans les LIMITES : tête absente ou inconnue (y compris quand la fin de N−1 a
+elle-même été écartée à une milliseconde partagée, ce qui se propage tant que les
+frontières successives sont partagées) → recul d'un tick comme avant ; plus de dix éléments
+dans les bornes (retardataire de N−1 en tête) → plafond trop bas, lecture stricte gardée ;
+moins de dix numéros 1T pour N hors fin de séance (contexte 1T à moins d'une barre par tick,
+non observé) → le plafond peut admettre un tick de N+1 daté de son ouverture, et ce tick
+peut en laisser passer un autre à la bougie suivante ; le tick lu à la milliseconde
+partagée reste hors des bornes de contrôle et la couverture (Diag 41/44, script Diag) le
+compte manquant en tête de N+1.
 Historique (clôture connue) : rien ne change. Pour revenir à l'ancien comportement :
 `bool liveOwnRead = false`.
 
@@ -257,9 +270,11 @@ suivante. Si le lag persiste sans lui, la cause est ailleurs.
 
 ## Script « BSP Diag »
 
-Reporter dans le jumeau : `const bool DIAG_FULL = true`, les deux correctifs de
-comportement, les textes partagés, le tri mémorisé. Sa section DIAG-SECTION reste la sienne :
-y reporter à la main le code `-8` du Diag 58, les libellés des Diag 55/58 et, si souhaité,
+Reporter dans le jumeau : `const bool DIAG_FULL = true`, la correction 0 (lecture du direct,
+cadence `boundsTailSkipped`, `staleData`), les deux correctifs de comportement, les textes
+partagés, le tri mémorisé. Sa section DIAG-SECTION reste la sienne : y reporter à la main le
+code `-8` du Diag 58, les libellés des Diag 55/58, le plancher à 0 du Diag 61
+(`math.max(exactUpper - lastShownTime, 0)`) et la dernière phrase de son libellé et, si souhaité,
 `display = showDiagnostics ? display.data_window : display.none` (inutile si ses
 diagnostics restent cochés). Diffèrent aussi, par nécessité, le titre, le nom court, le
 défaut et l'info-bulle de « Afficher les diagnostics ».
