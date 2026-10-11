@@ -59,12 +59,43 @@ identique » précisé).
 
 - Moteur `bspEngine1T` et enveloppe `bspEngine1TWithTrail` : identiques octet pour octet.
 - Rendu PAR DÉFAUT identique (toutes les options décochées ; « Garder la couleur »,
-  « Masquer pendant le préchauffage », remplissage et opacité cochés) : chaque changement de
-  code est soit sous une option, soit une réécriture prouvée équivalente, soit du calcul que
-  rien ne lit dans le script principal.
+  « Masquer pendant le préchauffage », remplissage et opacité cochés) à l'historique, et en
+  direct partout sauf la correction 0 ci-dessous (acceptée le 11/10) : chaque autre
+  changement de code est soit sous une option, soit une réécriture prouvée équivalente, soit
+  du calcul que rien ne lit dans le script principal.
 - 11 `plot()`, 28 réglages, mêmes positions.
 - Seule différence visible par défaut : diagnostics décochés, les sept lignes « Diag » vides
   n'apparaissent plus dans la fenêtre de données (c'était la promesse de l'info-bulle).
+
+## Correction 0 — le direct à la milliseconde partagée (rendu par défaut)
+
+Acceptée le 11/10. Sur un graphique en ticks, `time_close` est na à l'exécution confirmée
+d'une bougie en direct (mesuré par l'auteur : Diag 47 figé en direct), donc `time_close[1]`
+est na pendant N+1 : `prevCloseKnown` est faux, `ownUpper = time − 1` même verrou actif, et
+la lecture différée écartait le dernier tick de N daté de la milliseconde d'ouverture de
+N+1 — tick que le bord avait montré et qu'un rechargement relit (≈ 22 % des frontières en
+rafale le 25/09).
+
+Correctif (lignes ~2280-2297) : verrou actif et clôture inconnue, le tableau propre est lu
+**comme au bord** — jusqu'à l'ouverture de N+1 incluse, sous le plafond de compte « premier
+numéro daté dès l'ouverture de N + 9 » ([DC]) :
+
+```pine
+bool liveOwnRead = hasPrevBar and blockSorted and closeIsLastTrade and not prevCloseKnown
+int liveScan = math.min(count1, SCAN_MAX)
+int liveFirstIndex = liveOwnRead and count1 > 0 ? firstIndexAtOrAfter(times1, prevOpen) : liveScan
+int liveOwnCap = liveOwnRead and liveFirstIndex < liveScan ? array.get(serial1, liveFirstIndex) + EXPECTED_TICKS - 1 : na
+int candidateIndex = not na(liveOwnCap) ? math.min(lastIndexAtOrBefore(times1, time), lastIndexAtOrBefore(serial1, liveOwnCap)) : ownUpper == exactUpper ? boundsLastIndex : lastIndexAtOrBefore(times1, ownUpper)
+```
+
+C'est plus sûr que le correctif d'une ligne proposé d'abord (`ownUpper = time`) : sans le
+plafond de compte, la série aurait pu prendre plusieurs ticks de N+1 datés de la même
+milliseconde et rangés en queue du tableau de N. Avec lui, la série suit exactement la
+règle du bord et hérite seulement de son risque déjà mesuré (premier tick de N perdu ET
+premier tick de N+1 à la milliseconde partagée dans le tableau de N : avance d'un tick,
+≈ 1 % des bougies au Diag 64 du 25/09). Historique (clôture connue) : rien ne change. Pour
+revenir à l'ancien comportement : remplacer `not na(liveOwnCap) ? … :` par rien dans
+`candidateIndex`.
 
 ## Corrections de comportement (sous options seulement)
 
@@ -159,7 +190,8 @@ identique » précisé).
   et le coût réel de la restauration n'est pas documenté. **C'est le test A/B le plus
   rentable au profileur** : une ligne (`varip array<Tick> tickPool`), à essayer un soir de
   clôture, et à garder seulement si le profileur le justifie.
-- **Verrou de clôture inerte en direct** (relecture « série » ; 1 voix sur 3, mais les trois
+- ~~**Verrou de clôture inerte en direct**~~ — **appliqué le 11/10 (correction 0)**, avec
+  un plafond de compte en plus. Analyse d'origine : (relecture « série » ; 1 voix sur 3, mais les trois
   vérificateurs ont confirmé la chaîne ligne à ligne — seule la prémisse plateforme reste non
   mesurée). Prémisse : sur un graphique en ticks, `time_close` est na à l'exécution confirmée
   d'une bougie en direct — l'auteur l'a lui-même mesuré (Diag 47 figé en direct, v11.51) —,
@@ -230,7 +262,7 @@ fichier corrigé.
 | 6 | exécution | `firstTickOffsetMs` calculé à chaque exécution | 3 | v11.66 |
 | 7 | série | info-bulle « Garder la couleur » fausse pour l'estimation | 2 | v11.66 |
 | 8 | série | code mort de la lecture différée | 3 | DIAG_FULL, v11.66 |
-| 9 | série | verrou de clôture inerte en direct | 1 | LIMITES, v11.66 ; correctif laissé à l'auteur |
+| 9 | série | verrou de clôture inerte en direct | 1 | correction 0, v11.66 (acceptée le 11/10) |
 | 10 | bord | `valueMissingWithData` jamais lu | 2 | v11.66 |
 | 11 | bord | le bord ne lit pas sa propre traîne ; LIMITES fausse | 2 | LIMITES, v11.66 |
 | 12 | charge | réserve `var` restaurée à chaque mise à jour → `varip` | 2 | A/B à mesurer, non appliqué |

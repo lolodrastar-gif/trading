@@ -1,17 +1,32 @@
 //@version=6
 // ============================================================================
-// BSP v11.66 — [DU] AUDIT MULTI-RELECTEURS DE LA v11.65.1 (10/10) :
-//          DEUX CORRECTIFS SOUS OPTIONS, TEXTES, ALLÈGEMENTS SANS EFFET
+// BSP v11.66 — [DU] AUDIT MULTI-RELECTEURS DE LA v11.65.1 (10-11/10) :
+//          LECTURE DU DIRECT À LA MILLISECONDE PARTAGÉE, DEUX CORRECTIFS SOUS
+//          OPTIONS, TEXTES, ALLÈGEMENTS SANS EFFET
 // ============================================================================
 // Neuf relectures indépendantes (compilation v6, erreurs d'exécution, série,
 // bord, charge, moteur, réserve, textes, diagnostics), chaque trouvaille
 // contredite par trois relecteurs avant d'être retenue. Moteur bspEngine1T et
-// enveloppe : identiques octet pour octet. Rendu PAR DÉFAUT identique (toutes
-// les options décochées, « Garder la couleur » et « Masquer pendant le
-// préchauffage » cochées) pour les courbes, les couleurs, le remplissage, le
-// bord et l'échelle ; la fenêtre de données perd seulement les sept lignes
+// enveloppe : identiques octet pour octet. Rendu PAR DÉFAUT (toutes les
+// options décochées, « Garder la couleur » et « Masquer pendant le
+// préchauffage » cochées) identique à l'historique et, en direct, partout
+// sauf au point 0 ci-dessous ; la fenêtre de données perd les sept lignes
 // « Diag » vides. Aucune erreur de compilation ni d'exécution
 // trouvée ; aucun chemin de boucle approchant la limite de 500 ms.
+// 0. CORRECTIF DU DIRECT (rendu par défaut, accepté le 11/10) : sur un
+//    graphique en ticks, time_close est na à l'exécution confirmée d'une
+//    bougie en direct (Diag 47), donc time_close[1] est na pendant N+1 et le
+//    VERROU ne bornait plus rien : la lecture différée s'arrêtait à
+//    l'ouverture de N+1 − 1 et écartait le dernier tick de N daté de la
+//    milliseconde partagée — que le bord avait montré et qu'un rechargement
+//    relit (≈ 22 % des frontières en rafale le 25/09). Désormais, verrou
+//    actif et clôture inconnue, le tableau propre est lu COMME AU BORD :
+//    jusqu'à l'ouverture de N+1 incluse, sous le plafond de compte « premier
+//    numéro daté dès l'ouverture de N + 9 » ([DC]). Même règle que le bord,
+//    donc même risque, déjà mesuré au bord : premier tick de N perdu ET
+//    premier tick de N+1 daté de la milliseconde partagée rangé dans le
+//    tableau de N — la bougie close prend ce tick (Diag 64 du bord : ≈ 1 %
+//    des bougies le 25/09). Historique (clôture connue) : inchangé.
 // 1. CORRECTIFS (options seulement) :
 //    — « Reprises strictes » : après la coupure (dix bougies sans tick), une
 //      bougie dont le tick est à ratio indéfini (calcul indéfini, reprise
@@ -58,14 +73,13 @@
 //    identique en théorie, à mesurer en A/B au profileur), POOL_MAX /
 //    SCAN_MAX plus petits (gain au chargement seulement, et POOL_MAX doit
 //    rester ≥ 2 × POOL_BLOCK_MAX + 64 : un tableau verse un élément ET son
-//    prédécesseur par rang), lecture du tableau propre jusqu'à l'ouverture
-//    suivante quand time_close[1] est na en direct (voir LIMITES, [DU]) —
-//    chacun change une décision mesurée de l'auteur ou le rendu par défaut.
+//    prédécesseur par rang) — chacun change une décision mesurée de
+//    l'auteur.
 // SCRIPT « BSP Diag » : même fichier, DIAG_FULL = true et la section
 // DIAG-SECTION remplacée par la sienne ; diffèrent aussi, par nécessité, le
 // titre et le nom court d'indicator(), le défaut (coché) et l'info-bulle de
 // « Afficher les diagnostics ». Tout le reste (correctifs 1, textes 2,
-// allègements 3) s'y retrouve tel quel par copie, sauf ce qui est DANS la
+// allègements 3, correctif 0) s'y retrouve tel quel par copie, sauf ce qui est DANS la
 // DIAG-SECTION, à reporter À LA MAIN dans la sienne : les libellés des Diag
 // 55 et 58 (sans les mentions « script « BSP Diag » », sans objet là-bas),
 // la branche « recOffset == 1 ? -8.0 » du Diag 58 et, si souhaité,
@@ -939,7 +953,9 @@
 //    connue à l'historique (en direct, time_close[1] est na : LIMITES, [DU]).
 //    Le tick lu est le DERNIER élément de son tableau daté dans [ouverture,
 //    ownUpper]. ownUpper = clôture de N incluse dès que le VERROU est actif
-//    et la clôture connue (à l'historique)
+//    et la clôture connue (à l'historique) ; verrou actif et clôture inconnue
+//    (le direct, [DU]) : ouverture de N+1 incluse, sous le plafond de compte
+//    du bord (premier numéro daté dès l'ouverture de N + 9)
 //    (Diag 25 = 2 : une clôture a été observée antérieure à l'ouverture
 //    suivante, ce qui exclut que time_close soit toujours cette ouverture ;
 //    activation déduite hors première bougie de séance, jamais remise à
@@ -1092,21 +1108,19 @@
 // indécidable : jamais lu pour N depuis un autre tableau (Diag 63) ; lu depuis
 // le tableau propre dès que le verrou est actif, et signalé (Diag 27, 39,
 // qualité 2). Tant que le verrou n'est pas actif, la série peut reculer d'un
-// tick derrière le bord à une frontière partagée. EN DIRECT ([DU]), le verrou
-// est sans effet : sur un graphique en ticks, time_close est na à l'exécution
-// confirmée d'une bougie (Diag 47), donc time_close[1] est na pendant N+1,
-// prevCloseKnown est faux et ownUpper = ouverture de N+1 − 1 — exactement le
-// cas « verrou inactif » : à une milliseconde partagée, la série écarte le
-// dernier tick de N que le bord a montré, et un rechargement (time_close
-// connu, verrou actif : Diag 25 = 2) le relira. Pour la même raison, en
+// tick derrière le bord à une frontière partagée. EN DIRECT ([DU]),
+// time_close[1] est na pendant N+1 (time_close est na à l'exécution
+// confirmée d'une bougie sur un graphique en ticks, Diag 47) : verrou actif,
+// le tableau propre y est lu comme au bord — jusqu'à l'ouverture de N+1
+// incluse, sous le plafond « premier numéro daté dès l'ouverture de N + 9 ».
+// Il hérite du risque du bord : si le premier tick de N manque et que le
+// premier tick de N+1, daté de la milliseconde partagée, est rangé dans le
+// tableau de N, la bougie close le prend (avance d'un tick, ≈ 1 % des
+// bougies au Diag 64 du bord le 25/09) ; un rechargement, clôture connue,
+// lit jusqu'à la clôture sans plafond de compte. Pour la même raison, en
 // direct, l'option « Frontière partagée : attribution par numéro »
 // (boundaryMs exige prevCloseKnown) et le Diag 64 du script Diag
-// (edgeAheadOfClose aussi) sont inactifs. Lecture du code, non mesurée ; non
-// corrigé : lire le
-// tableau propre jusqu'à l'ouverture de N+1 incluse en direct supprimerait
-// ce recul au prix d'une avance d'un tick quand cet élément est en fait le
-// premier tick de N+1 (le bord accepte déjà ce risque, Diag 64) et
-// changerait le rendu par défaut. Verrou actif ou non, deux
+// (edgeAheadOfClose aussi) sont inactifs. Verrou actif ou non, deux
 // autres reculs du bord à la série existent à une milliseconde partagée
 // (jumeau du rendu, v11.62) : le bord, qui ne connaît pas l'ouverture de
 // la suivante, peut montrer un tick de la RÉSERVE daté de la milliseconde
@@ -1213,8 +1227,9 @@
 //   (lastShownWarm) ; textes ; DIAG_FULL compile hors du principal ce que
 //   rien n'y lit ; bord calculé sur la dernière bougie seulement ;
 //   dichotomies en double retirées ; tri du tableau figé mémorisé ;
-//   diagnostics décochés : display.none ; verrou de clôture inerte en direct
-//   écrit dans les LIMITES. Moteur et courbes par défaut inchangés.
+//   diagnostics décochés : display.none ; en direct, verrou actif et
+//   clôture inconnue, le tableau propre est lu comme au bord (dernier tick
+//   de N à la milliseconde partagée gardé). Moteur inchangé.
 // v11.65 [DT] régime des tracés (11 dans le principal, 59 dans « BSP Diag »,
 //   diagnostics décochés par défaut) ; comportement v11.63 rétabli (reprise
 //   jamais coupée, « Garder la couleur », bord au plafond propre, options
@@ -2336,6 +2351,19 @@ var bool closeIsLastTrade = false
 if hasPrevBar and prevCloseKnown and not session.isfirstbar and time_close[1] < time
     closeIsLastTrade := true
 int ownUpper = closeIsLastTrade ? exactUpper : neighbourUpper
+// [DU] DIRECT : clôture de N inconnue pendant N+1 (time_close est na à
+// l'exécution confirmée d'une bougie en ticks, Diag 47), donc ownUpper =
+// ouverture de N+1 − 1 même verrou actif, et le dernier tick de N daté de la
+// milliseconde partagée — montré par le bord, relu au rechargement — était
+// écarté. Verrou actif et clôture inconnue : le tableau propre est lu comme
+// au bord, jusqu'à l'ouverture de N+1 INCLUSE et sous le plafond de compte
+// « premier numéro daté dès l'ouverture de N + 9 » ([DC]). Heures et numéros
+// étant triés ensemble (isSorted), le minimum des deux rangs est le dernier
+// élément qui respecte les deux bornes.
+bool liveOwnRead = hasPrevBar and blockSorted and closeIsLastTrade and not prevCloseKnown
+int liveScan = math.min(count1, SCAN_MAX)
+int liveFirstIndex = liveOwnRead and count1 > 0 ? firstIndexAtOrAfter(times1, prevOpen) : liveScan
+int liveOwnCap = liveOwnRead and liveFirstIndex < liveScan ? array.get(serial1, liveFirstIndex) + EXPECTED_TICKS - 1 : na
 
 // Tick lu : dernier élément du tableau de N daté dans [ouverture, ownUpper].
 // Un élément daté après la clôture est écarté et compté (Diag 27, 39).
@@ -2344,8 +2372,9 @@ int ownUpper = closeIsLastTrade ? exactUpper : neighbourUpper
 int boundsLastIndex = lastIndexAtOrBefore(times1, exactUpper)
 int boundsLastTime = boundsLastIndex >= 0 ? array.get(times1, boundsLastIndex) : na
 bool boundsHasTick = hasPrevBar and blockSorted and boundsLastIndex >= 0 and boundsLastTime >= prevOpen
-// [DU] Même dichotomie que boundsLastIndex dès que ownUpper = exactUpper.
-int candidateIndex = ownUpper == exactUpper ? boundsLastIndex : lastIndexAtOrBefore(times1, ownUpper)
+// [DU] Même dichotomie que boundsLastIndex dès que ownUpper = exactUpper ;
+// en direct sous verrou, la lecture du bord (liveOwnCap, ci-dessus).
+int candidateIndex = not na(liveOwnCap) ? math.min(lastIndexAtOrBefore(times1, time), lastIndexAtOrBefore(serial1, liveOwnCap)) : ownUpper == exactUpper ? boundsLastIndex : lastIndexAtOrBefore(times1, ownUpper)
 int candidateTime = candidateIndex >= 0 ? array.get(times1, candidateIndex) : na
 // La borne basse conditionne aussi l'acceptation : un tableau sans élément
 // dans [ouverture, clôture] n'est pas une source (Diag 17, 30).
