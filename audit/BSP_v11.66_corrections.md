@@ -1,16 +1,16 @@
 # BSP v11.66 — corrections de la v11.65.1
 
-Date : 10/10/2026. Fichier corrigé : `src/BSP_v11.66.pine` (base : `src/BSP_v11.65.1.pine`,
+Date : 10-11/10/2026. Fichier corrigé : `src/BSP_v11.66.pine` (base : `src/BSP_v11.65.1.pine`,
 le script collé tel quel). Diff : `git diff --no-index src/BSP_v11.65.1.pine src/BSP_v11.66.pine`.
 
 ## Méthode
 
 Neuf relectures indépendantes du code (compilation Pine v6, erreurs d'exécution, logique de
 la série, cohérence bord/série sur toutes les combinaisons d'options, charge en rafale,
-moteur et estimation, réserve, textes, diagnostics), puis chaque trouvaille contredite par
-trois relecteurs distincts (réfutation, reconstruction du scénario, validité du correctif).
-36 trouvailles ; 13 confirmées à trois voix avant une coupure de quota, le reste jugé par
-moi ligne à ligne (section « Jugées à la main »).
+moteur et estimation, réserve, textes, diagnostics), une relecture de complétude (« qu'ont-ils
+manqué ? »), puis chaque trouvaille contredite par trois vérificateurs distincts (réfutation,
+reconstruction du scénario, validité du correctif ; retenue à 2 voix sur 3 au moins).
+**42 trouvailles, 38 confirmées, 4 rejetées** — tableau complet en fin de document.
 
 **Limite inchangée :** aucun compilateur Pine n'existe hors de TradingView. Le script n'a été
 ni compilé ni exécuté ; la latence n'est pas mesurée. Les deux relectures « compilation » et
@@ -49,6 +49,8 @@ par trouvaille :
   code est soit sous une option, soit une réécriture prouvée équivalente, soit du calcul que
   rien ne lit dans le script principal.
 - 11 `plot()`, 28 réglages, mêmes positions.
+- Seule différence visible par défaut : diagnostics décochés, les sept lignes « Diag » vides
+  n'apparaissent plus dans la fenêtre de données (c'était la promesse de l'info-bulle).
 
 ## Corrections de comportement (sous options seulement)
 
@@ -91,6 +93,12 @@ par trouvaille :
 | Commentaire de l'échelle | « la non dominante la couleur choisie » | couleur Neutre (22e réglage non lu) |
 | `poolInsert` | « inatteignable sur une réserve triée par numéro » | inatteignable parce que l'ordre des heures refuse ce cas |
 | `movingAverage` | — | avertissement du compilateur attendu et justifié (kind est simple) |
+| En-tête §5, commentaire du pont | « seuls le préchauffage, la 1re bougie de séance, hors 1T coupent la courbe » | par défaut ; « Reprises strictes » la coupe aussi |
+| En-tête §6 | plafond du bord sans l'option | mentionne l'option « plafond prudent » |
+| Info-bulle « Garder la couleur » | « Reprises strictes », en fin de liste | en fin de la section « 2 — Rendu 10T » (TradingView regroupe par groupe) |
+| Titres Diag 12, 33, 58 | renvoient aux Diag 25, 32, 48, 62 | précisent « script BSP Diag » |
+| En-tête v11.66, jumeau | seule la DIAG-SECTION diffère | diffèrent aussi titre, nom court, défaut et info-bulle de « Afficher les diagnostics » |
+| LIMITES, verrou de clôture | recul d'un tick « tant que le verrou n'est pas actif » | en direct le verrou est sans effet (time_close na à la confirmation) : recul possible à chaque milliseconde partagée, relu au rechargement |
 
 ## Allègements sans effet sur le rendu
 
@@ -115,16 +123,21 @@ par trouvaille :
 - Branches mortes des couleurs de l'axe (`axisState == -1 ? neutralColor : neutralColor`).
 - Diag 58 : code −8 pour un élément livré relu depuis la réserve avec source = la bougie
   elle-même (inatteignable par construction ; affiché « 1 » jusqu'ici, ce qui aurait masqué
-  un tableau figé différent du tableau versé, Diag 10).
-
-## Jugées à la main (quota de vérification coupé) — retenues
-
-Les textes ci-dessus (Diag 55, « décalés », renvois au script Diag, 25e réglage, réserve
-6 000-9 000, échelle, HMA), le correctif 2, DIAG_FULL, `emptyInts`, les dichotomies, l'axe.
+  un tableau figé différent du tableau versé, Diag 10). Les vérificateurs ont jugé ce cas
+  sans effet visible (1 voix sur 3) ; le code −8 est gardé parce qu'il ne coûte rien.
+- **Tri du tableau figé mémorisé** : `isSorted(times1, serial1)` était refait à chaque
+  mise à jour de N+1 sur le même tableau. Le résultat est mémorisé à l'exécution confirmée
+  de N (bougie, taille, valeur) et réutilisé si la bougie et la taille concordent ; sinon
+  recalculé. Gain : 10 à 30 itérations par exécution en direct, la moitié de tout `isSorted`
+  au chargement, 2 000 itérations par bougie sur les tableaux démesurés.
+- **Diagnostics décochés : `display.none`** sur les sept tracés de diagnostic (ils restaient
+  listés, vides, dans la fenêtre de données).
 
 ## Écartées — à ne pas appliquer sans mesure
 
-- **`varip` sur la réserve** (relecture « charge », confiance 0,6). Hypothèse : TradingView
+- **`varip` sur la réserve** (relecture « charge » ; 2 vérificateurs sur 3, mais à confiance
+  0,4 : contenu identique prouvé, coût de la restauration non démontré ; le troisième
+  rappelle que le profileur de l'auteur place le bloc de la réserve à ≈ 5 % en direct). Hypothèse : TradingView
   restaure chaque `var` avant chaque exécution ; une réserve de 6 000 à 9 000 objets copiée
   ~1 000 fois par seconde serait LE mécanisme de lag interne au script. La réserve n'est
   écrite qu'à l'exécution confirmée : `varip` donnerait un contenu identique à chaque
@@ -132,23 +145,30 @@ Les textes ci-dessus (Diag 55, « décalés », renvois au script Diag, 25e rég
   et le coût réel de la restauration n'est pas documenté. **C'est le test A/B le plus
   rentable au profileur** : une ligne (`varip array<Tick> tickPool`), à essayer un soir de
   clôture, et à garder seulement si le profileur le justifie.
-- **Verrou de clôture inerte en direct ?** (relecture « série », 1 voix sur 2). Si
-  `time_close[1]` est na en direct sur un graphique en ticks, `prevCloseKnown` est faux,
-  `ownUpper = time − 1`, et la série écarte le dernier tick de N à chaque milliseconde
-  partagée (le bord l'avait montré) : retard d'un tick sur ≈ 22 % des frontières en rafale,
-  puis valeur différente après rechargement. Les mesures de l'auteur (Diag 63 en direct,
-  Diag 25 = 2) semblent dire le contraire. À trancher avec le script Diag en direct : Diag 46
-  (clôture connue) et Diag 25 sur quelques bougies de rafale. Si c'est confirmé, le
-  correctif proposé est `int ownUpper = closeIsLastTrade ? (prevCloseKnown ? exactUpper : time) : neighbourUpper`
-  — il échange un retard systématique contre l'avance d'un tick que le bord accepte déjà.
-- **POOL_MAX 6 000 → 2 000-3 000, SCAN_MAX 2 000 → 500** : plausibles (aucune lecture ne
-  remonte au-delà du dernier élément sous une borne récente), mais ces valeurs ont été
-  fixées sur profileur et modèle par l'auteur ; gain en direct faible (purge et décalages
-  d'insertion plus courts).
-- **Cache du tri du tableau figé** (`isSorted` relu à chaque exécution de N+1) : 10 à 30
-  itérations par exécution en direct, repose sur l'hypothèse Diag 10 = 0.
-- **Compteur des refus de `poolInsert`** : panne silencieuse hypothétique (horodatage non
-  monotone côté plateforme), diagnostic seulement, pour le script Diag.
+- **Verrou de clôture inerte en direct** (relecture « série » ; 1 voix sur 3, mais les trois
+  vérificateurs ont confirmé la chaîne ligne à ligne — seule la prémisse plateforme reste non
+  mesurée). Prémisse : sur un graphique en ticks, `time_close` est na à l'exécution confirmée
+  d'une bougie en direct — l'auteur l'a lui-même mesuré (Diag 47 figé en direct, v11.51) —,
+  donc `time_close[1]` est na pendant N+1, `prevCloseKnown` est faux, `ownUpper = time − 1`
+  même verrou actif, et la série écarte le dernier tick de N daté de la milliseconde
+  d'ouverture de N+1, que le bord avait montré ; au rechargement il est relu. Effet : recul
+  d'un tick sur les frontières partagées en direct (≈ 22 % des frontières en rafale le
+  25/09). **Documenté dans les LIMITES, non corrigé** : le correctif
+  `int ownUpper = closeIsLastTrade ? (prevCloseKnown ? exactUpper : time) : neighbourUpper`
+  change le rendu par défaut et échange ce recul contre l'avance d'un tick quand l'élément
+  est en fait le premier tick de N+1 (risque que le bord accepte déjà, Diag 64). C'est une
+  décision de conception à prendre par l'auteur ; vérification possible avec le script Diag
+  en direct : Diag 46 (clôture connue) et Diag 39 sur des bougies de rafale.
+- **POOL_MAX 6 000 → 2 000-3 000, SCAN_MAX 2 000 → 500** (2 voix sur 3 chacune, à
+  confiance 0,45-0,55) : aucune lecture ne remonte au-delà du dernier élément sous une
+  borne récente, mais le coût amorti de la purge est inchangé (≈ 20 copies par bougie
+  quelle que soit la taille), les décalages d'`array.insert` ne dépendent pas de POOL_MAX
+  (ils déplacent les seuls éléments plus récents), et le gain ne joue qu'au chargement des
+  jours à tableaux démesurés. Non appliqué. Si l'auteur réduit quand même : **POOL_MAX ≥
+  2 × POOL_BLOCK_MAX + 64** (un tableau verse un élément ET son prédécesseur par rang ; la
+  proposition initiale « POOL_MAX 3 000 avec POOL_BLOCK_MAX 2 000 » était fausse).
+- **Compteur des refus de `poolInsert`** (0 voix sur 3) : toutes les paires (numéro, heure)
+  viennent du même contexte 1T, un refus n'est pas atteignable par les données.
 - Appels `movingAverage` hors du `if weightedMode` : toucherait le moteur pour un
   avertissement bénin.
 
@@ -172,5 +192,58 @@ suivante. Si le lag persiste sans lui, la cause est ailleurs.
 ## Script « BSP Diag »
 
 Reporter dans le jumeau : `const bool DIAG_FULL = true`, les deux correctifs de
-comportement, les textes partagés. Sa section DIAG-SECTION reste la sienne ; `-8` du Diag 58
-y est à ajouter si son libellé est repris.
+comportement, les textes partagés, le tri mémorisé. Sa section DIAG-SECTION reste la sienne :
+y reporter à la main le code `-8` du Diag 58, les libellés des Diag 55/58 et, si souhaité,
+`display = showDiagnostics ? display.data_window : display.none` (inutile si ses
+diagnostics restent cochés). Diffèrent aussi, par nécessité, le titre, le nom court, le
+défaut et l'info-bulle de « Afficher les diagnostics ».
+
+## Tableau des 42 trouvailles
+
+Voix = vérificateurs sur 3 qui ont jugé la trouvaille réelle. « v11.66 » = traitée dans le
+fichier corrigé.
+
+| # | Domaine | Trouvaille | Voix | Suite |
+|---|---|---|---|---|
+| 1 | compilation | avertissements du compilateur sur les `ta.*` de `movingAverage` (switch) | 3 | commentaire, v11.66 (bénin : kind est simple) |
+| 2 | compilation | idem sur les appels de `movingAverage` sous `if weightedMode` | 2 | bénin, moteur non touché |
+| 3 | compilation | dix-neuf compteurs écrits jamais lus dans le principal | 3 | DIAG_FULL, v11.66 |
+| 4 | compilation | balayage du Diag 63 calculé, Diag 63 absent | 2 | DIAG_FULL, v11.66 |
+| 5 | compilation | `firstTickOffsetMs`, `valueMissingWithData`, `trailAdded`/`elementAdded` jamais lus | 3 | v11.66 |
+| 6 | exécution | `firstTickOffsetMs` calculé à chaque exécution | 3 | v11.66 |
+| 7 | série | info-bulle « Garder la couleur » fausse pour l'estimation | 2 | v11.66 |
+| 8 | série | code mort de la lecture différée | 3 | DIAG_FULL, v11.66 |
+| 9 | série | verrou de clôture inerte en direct | 1 | LIMITES, v11.66 ; correctif laissé à l'auteur |
+| 10 | bord | `valueMissingWithData` jamais lu | 2 | v11.66 |
+| 11 | bord | le bord ne lit pas sa propre traîne ; LIMITES fausse | 2 | LIMITES, v11.66 |
+| 12 | charge | réserve `var` restaurée à chaque mise à jour → `varip` | 2 | A/B à mesurer, non appliqué |
+| 13 | charge | POOL_MAX / marge 3-4 × trop grands | 2 | non appliqué (voir ci-dessus) |
+| 14 | charge | tri du tableau figé refait à chaque mise à jour | 3 | v11.66 |
+| 15 | charge | bord calculé sur chaque bougie d'historique | 3 | v11.66 |
+| 16 | charge | SCAN_MAX 2 000 → 500 | 2 | non appliqué (chargement seulement) |
+| 17 | charge | compteurs morts restaurés à chaque mise à jour | 2 | DIAG_FULL, v11.66 |
+| 18 | charge | trois dichotomies en double | 3 | v11.66 |
+| 19 | charge | `emptyInts` alloué à chaque exécution | 3 | v11.66 |
+| 20 | moteur | estimation colorée pendant le préchauffage | 3 | correctif 2, v11.66 |
+| 21 | moteur | commentaire « HMA à dénominateur négatif » | 3 | v11.66 |
+| 22 | moteur | branches mortes des couleurs de l'axe | 3 | v11.66 |
+| 23 | réserve | Diag 63 et trois compteurs de réserve non tracés | 2 | DIAG_FULL, v11.66 |
+| 24 | réserve | en-tête « 6 000 au plus » | 3 | v11.66 |
+| 25 | réserve | refus silencieux de `poolInsert` | 0 | rejetée |
+| 26 | texte | « Garder la couleur » décochée et estimation | 3 | v11.66 |
+| 27 | texte | « Masquer pendant le préchauffage » et estimation | 3 | v11.66 (texte + correctif 2) |
+| 28 | texte | Diag 55 : −1 et −2 | 3 | v11.66 |
+| 29 | texte | « décalés d'une bougie » — pas le Diag 55 | 2 | v11.66 |
+| 30 | texte | info-bulles renvoyant à des Diag absents | 3 | v11.66 |
+| 31 | texte | « tickHistoryInput, en fin de liste » | 3 | v11.66 |
+| 32 | texte | « COMMENT ÇA MARCHE » §4 réserve | 3 | v11.66 |
+| 33 | texte | échelle : « la couleur choisie » | 3 | v11.66 |
+| 34 | diagnostics | ~25 séries et ~20 compteurs morts | 2 | DIAG_FULL, v11.66 |
+| 35 | diagnostics | balayage du Diag 63 à chaque tick, diagnostics cochés | 2 | DIAG_FULL, v11.66 |
+| 36 | diagnostics | Diag 58 : rang 1 affiché « 1 » | 1 | rejetée (inatteignable) ; code −8 gardé |
+| 37 | complétude | lignes « Diag » vides dans la fenêtre de données | 3 | v11.66 |
+| 38 | complétude | « seuls … coupent la courbe » ignore « Reprises strictes » | 3 | v11.66 |
+| 39 | complétude | titres Diag renvoyant aux Diag 25/32/48/62 | 2 | v11.66 |
+| 40 | complétude | contrat du jumeau et code mort hors section | 2 | DIAG_FULL + en-tête, v11.66 |
+| 41 | complétude | « Reprises strictes », « en fin de liste » | 3 | v11.66 |
+| 42 | complétude | défauts 5 000 barres / 60 000 ticks pour 1 000 dessinées | 1 | rejetée (réglage documenté) |
