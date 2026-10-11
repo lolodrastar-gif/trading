@@ -41,6 +41,20 @@ par trouvaille :
 - trois imprécisions de texte dans le nouvel en-tête, corrigées (consigne de report vers le
   jumeau ; « prédécesseur » → « élément livré » pour le code −8 ; libellé du Diag 61).
 
+## Vérification de la dernière série (tri mémorisé, lignes Diag masquées, textes)
+
+Trois relecteurs (compilation, équivalence, textes) : aucune erreur de compilation ; le tri
+mémorisé est prouvé équivalent au recalcul dans tous les cas (historique, mises à jour en
+direct, bougie sans exécution confirmée, bar 0/1) ; `display = showDiagnostics ?
+display.data_window : display.none` attendu valide (paramètre `display` de type « input
+plot_display » ; référence TradingView non joignable ici, confiance ≈ 0,9 — repli si le
+compilateur refuse : remettre `display = display.data_window`, seules les lignes vides
+reviennent). Neuf imprécisions de texte et de commentaires relevées, toutes corrigées
+(consigne de report vers le jumeau, §3 de l'en-tête et commentaire des frontières en direct,
+« rechargement le relira » conditionné au verrou, option « attribution par numéro » et
+Diag 64 inactifs en direct, commentaires d'`isSorted`, renvoi du Diag 10, « rendu par défaut
+identique » précisé).
+
 ## Ce qui est garanti
 
 - Moteur `bspEngine1T` et enveloppe `bspEngine1TWithTrail` : identiques octet pour octet.
@@ -159,6 +173,9 @@ par trouvaille :
   est en fait le premier tick de N+1 (risque que le bord accepte déjà, Diag 64). C'est une
   décision de conception à prendre par l'auteur ; vérification possible avec le script Diag
   en direct : Diag 46 (clôture connue) et Diag 39 sur des bougies de rafale.
+  Conséquence de la même prémisse : en direct, l'option « Frontière partagée : attribution
+  par numéro » (`boundaryMs` exige `prevCloseKnown`) et le Diag 64 (bord en avance) ne
+  peuvent pas se déclencher ; écrit dans les LIMITES.
 - **POOL_MAX 6 000 → 2 000-3 000, SCAN_MAX 2 000 → 500** (2 voix sur 3 chacune, à
   confiance 0,45-0,55) : aucune lecture ne remonte au-delà du dernier élément sous une
   borne récente, mais le coût amorti de la purge est inchangé (≈ 20 copies par bougie

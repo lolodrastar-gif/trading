@@ -8,7 +8,9 @@
 // contredite par trois relecteurs avant d'être retenue. Moteur bspEngine1T et
 // enveloppe : identiques octet pour octet. Rendu PAR DÉFAUT identique (toutes
 // les options décochées, « Garder la couleur » et « Masquer pendant le
-// préchauffage » cochées). Aucune erreur de compilation ni d'exécution
+// préchauffage » cochées) pour les courbes, les couleurs, le remplissage, le
+// bord et l'échelle ; la fenêtre de données perd seulement les sept lignes
+// « Diag » vides. Aucune erreur de compilation ni d'exécution
 // trouvée ; aucun chemin de boucle approchant la limite de 500 ms.
 // 1. CORRECTIFS (options seulement) :
 //    — « Reprises strictes » : après la coupure (dix bougies sans tick), une
@@ -35,7 +37,7 @@
 //    y reste en retard d'un tick ; tickHistoryInput est le 25e réglage ;
 //    chiffre de l'axe non dominant en Neutre ; avertissement attendu du
 //    compilateur sur les ta.* de movingAverage (kind est simple : bénin).
-// 3. ALLÈGEMENTS, rendu identique : DIAG_FULL (const, false ici, true dans
+// 3. ALLÈGEMENTS, courbes identiques : DIAG_FULL (const, false ici, true dans
 //    « BSP Diag ») compile hors du principal les dix-neuf compteurs, le
 //    balayage du Diag 63, la qualité, les mémoires du bord (Diag 64, 10,
 //    47) que rien n'y lit ; le bord n'est calculé que sur la dernière bougie
@@ -46,9 +48,11 @@
 //    source = la bougie elle-même — un prédécesseur de la réserve reste −7 :
 //    inatteignable sauf tableau figé différent du tableau versé, Diag 10).
 //    Tri du tableau figé de N mémorisé à l'exécution confirmée de N : il
-//    n'est plus re-vérifié à chaque mise à jour de N+1 (même tableau, même
-//    taille, même bougie ; sinon re-vérifié). Diagnostics décochés, les sept
-//    lignes « Diag » n'apparaissent plus dans la fenêtre de données.
+//    n'est plus re-vérifié à chaque mise à jour de N+1 (même bougie, même
+//    taille ; le tableau figé est supposé celui de l'exécution confirmée,
+//    [DG], Diag 10 ; sinon re-vérifié). Diagnostics décochés, les sept
+//    lignes « Diag » n'apparaissent plus dans la fenêtre de données (dans
+//    la DIAG-SECTION : propre au script principal).
 // 4. ÉCARTÉ, documenté dans le rapport d'audit (audit/BSP_v11.65.1_audit.md
 //    et audit/BSP_v11.66_corrections.md) : varip sur la réserve (sortie
 //    identique en théorie, à mesurer en A/B au profileur), POOL_MAX /
@@ -61,9 +65,11 @@
 // DIAG-SECTION remplacée par la sienne ; diffèrent aussi, par nécessité, le
 // titre et le nom court d'indicator(), le défaut (coché) et l'info-bulle de
 // « Afficher les diagnostics ». Tout le reste (correctifs 1, textes 2,
-// allègements 3) s'y retrouve tel quel par copie.
-// À reporter À LA MAIN dans sa section : les libellés des Diag 55 et 58 et la
-// branche « recOffset == 1 ? -8.0 » du Diag 58 (voir
+// allègements 3) s'y retrouve tel quel par copie, sauf ce qui est DANS la
+// DIAG-SECTION, à reporter À LA MAIN dans la sienne : les libellés des Diag
+// 55 et 58 (sans les mentions « script « BSP Diag » », sans objet là-bas),
+// la branche « recOffset == 1 ? -8.0 » du Diag 58 et, si souhaité,
+// « display = showDiagnostics ? display.data_window : display.none » (voir
 // audit/BSP_v11.66_corrections.md). Diagnostics décochés dans le jumeau : le
 // bord n'est plus calculé sur l'historique (edgeNeeded), donc son Diag 64 n'y
 // compte plus — rien n'est tracé dans ce cas.
@@ -929,9 +935,11 @@
 //    heure (Diag 49) : un tableau non trié n'est ni lu ni versé dans la
 //    réserve, et sa traîne n'est pas lue.
 // 3. LECTURE DIFFÉRÉE. La bougie N est lue pendant N+1 et tracée à sa place
-//    (offset −1) : son tableau est alors figé et son heure de clôture connue.
+//    (offset −1) : son tableau est alors figé ; son heure de clôture est
+//    connue à l'historique (en direct, time_close[1] est na : LIMITES, [DU]).
 //    Le tick lu est le DERNIER élément de son tableau daté dans [ouverture,
 //    ownUpper]. ownUpper = clôture de N incluse dès que le VERROU est actif
+//    et la clôture connue (à l'historique)
 //    (Diag 25 = 2 : une clôture a été observée antérieure à l'ouverture
 //    suivante, ce qui exclut que time_close soit toujours cette ouverture ;
 //    activation déduite hors première bougie de séance, jamais remise à
@@ -1090,7 +1098,11 @@
 // prevCloseKnown est faux et ownUpper = ouverture de N+1 − 1 — exactement le
 // cas « verrou inactif » : à une milliseconde partagée, la série écarte le
 // dernier tick de N que le bord a montré, et un rechargement (time_close
-// connu) le relira. Lecture du code, non mesurée ; non corrigé : lire le
+// connu, verrou actif : Diag 25 = 2) le relira. Pour la même raison, en
+// direct, l'option « Frontière partagée : attribution par numéro »
+// (boundaryMs exige prevCloseKnown) et le Diag 64 du script Diag
+// (edgeAheadOfClose aussi) sont inactifs. Lecture du code, non mesurée ; non
+// corrigé : lire le
 // tableau propre jusqu'à l'ouverture de N+1 incluse en direct supprimerait
 // ce recul au prix d'une avance d'un tick quand cet élément est en fait le
 // premier tick de N+1 (le bord accepte déjà ce risque, Diag 64) et
@@ -1200,7 +1212,9 @@
 //   sur un tick indéfini ; estimation grise pendant le préchauffage
 //   (lastShownWarm) ; textes ; DIAG_FULL compile hors du principal ce que
 //   rien n'y lit ; bord calculé sur la dernière bougie seulement ;
-//   dichotomies en double retirées. Moteur et rendu par défaut inchangés.
+//   dichotomies en double retirées ; tri du tableau figé mémorisé ;
+//   diagnostics décochés : display.none ; verrou de clôture inerte en direct
+//   écrit dans les LIMITES. Moteur et courbes par défaut inchangés.
 // v11.65 [DT] régime des tracés (11 dans le principal, 59 dans « BSP Diag »,
 //   diagnostics décochés par défaut) ; comportement v11.63 rétabli (reprise
 //   jamais coupée, « Garder la couleur », bord au plafond propre, options
@@ -1509,8 +1523,10 @@ int neutralFillCap = input.int(
     tooltip = "Plafond de transparence du REMPLISSAGE neutre, pour qu'il se lise comme du gris et non comme du noir sur fond sombre. « Transparence — neutre » agit en dessous de ce plafond.\n\n100 = aucun plafond, rendu d'origine. Les courbes ne sont pas concernées.",
     group = G_COLORS)
 
-// [DU] Un seul interrupteur distingue les deux fichiers hors DIAG-SECTION :
-// false ici, true dans « BSP Diag ». Ce que le principal ne trace pas (les
+// [DU] Hors DIAG-SECTION, un seul interrupteur de CODE distingue les deux
+// fichiers : false ici, true dans « BSP Diag » (diffèrent aussi le titre, le
+// nom court, le défaut et l'info-bulle de « Afficher les diagnostics » : voir
+// l'en-tête). Ce que le principal ne trace pas (les
 // dix-neuf compteurs, le balayage du Diag 63, la qualité, les mémoires du
 // bord des Diag 64/10/47, firstTickOffsetMs) n'y est plus calculé.
 const bool DIAG_FULL = false
@@ -1674,8 +1690,9 @@ lastIndexAtOrBefore(array<int> times, int target) =>
             highRank := middle - 1
     found
 
-// Un tableau 1T est-il trié par heure ? Vérifié une fois par exécution sur
-// son préfixe de SCAN_MAX éléments ([DH]) ; les lectures reçoivent le résultat.
+// Un tableau 1T est-il trié par heure ? Vérifié au plus une fois par exécution
+// sur son préfixe de SCAN_MAX éléments ([DH]) — le tableau figé, une fois par
+// bougie ([DU]) ; les lectures reçoivent le résultat.
 isSorted(array<int> times, array<int> serials) =>
     int size = math.min(array.size(times), SCAN_MAX)
     bool sorted = array.size(times) == array.size(serials)
@@ -2246,9 +2263,10 @@ int count0 = array.size(timeTicks)
 int count1 = array.size(times1)
 bool oversizedBlock = count1 > PLAUSIBLE_TICK_CAP
 
-// Les dichotomies supposent un tableau trié par heure : vérifié ici, une fois
-// par exécution. Un bloc non trié est écarté (aucune mesure) et compté au
-// Diag 49.
+// Les dichotomies supposent un tableau trié par heure : le tableau vivant est
+// vérifié ici à chaque exécution ; le tableau figé, une fois par bougie
+// (résultat mémorisé à l'exécution confirmée de N, [DU], ci-dessous). Un bloc
+// non trié est écarté (aucune mesure) et compté au Diag 49.
 bool blockAligned = array.size(raw1) == count1 and array.size(state1) == count1 and array.size(warm1) == count1 and array.size(context1) == count1 and array.size(reference1) == count1 and array.size(close1) == count1
 // [DU] Le tableau figé de N est le tableau vivant de N à son exécution
 // confirmée (même hypothèse que le versement unique, [DG]) : son tri y a été
@@ -2294,7 +2312,8 @@ int exactUpper = prevCloseKnown ? time_close[1] : time - 1
 // ne prouve rien — ni le numéro 1T ni le prix n'y rattachent un tick.
 //   — Le TABLEAU PROPRE de N fait foi jusqu'à la clôture de N INCLUSE
 //     (exactUpper) : une bougie close ne recule jamais derrière ce que son
-//     bord a montré, sauf pour écarter un tick daté APRÈS sa clôture. Une
+//     bord a montré, sauf pour écarter un tick daté APRÈS sa clôture — hors
+//     direct, où la clôture n'est pas connue (LIMITES, [DU]). Une
 //     lecture datée de la milliseconde partagée est gardée et signalée
 //     (Diag 27, 39, qualité 2) : indécidable, pas fausse.
 //   — Un TABLEAU VOISIN n'a pas l'attribution du fournisseur : un tick n'y est
@@ -3392,12 +3411,12 @@ plot(
 // ============================================================================
 
 color invisible = #00000000
-// [DU] Diagnostics décochés : display.none (ternaire « input » sur chaque
-// tracé) — aucune ligne dans la fenêtre de données ; une valeur na y laissait
-// sept lignes vides aux titres d'un paragraphe.
 
 // [DT] DIAG-SECTION-BEGIN — script principal : sept diagnostics seulement.
 // Les 59 sont dans « BSP Diag v11.65 » (même moteur, cette section remplacée).
+// [DU] Diagnostics décochés : display.none (ternaire « input » sur chaque
+// tracé) — aucune ligne dans la fenêtre de données ; une valeur na y laissait
+// sept lignes vides aux titres d'un paragraphe.
 
 plot(showDiagnostics ? (hasIntrabar ? 1.0 : 0.0) : na,
     "Diag 11 — tick lu dans le tableau de la bougie (0/1)",
@@ -3420,7 +3439,7 @@ plot(showDiagnostics ? (curCapUnavailable ? -2.0 : not curSorted and not edgeFre
     color = invisible, format = format.price, precision = 0, display = showDiagnostics ? display.data_window : display.none)
 
 plot(showDiagnostics and hasPrevBar ? (fromNeighbour ? (recByCount ? -6.0 : recFromTrail ? -5.0 : recFromPoolTrail ? -7.0 : recOffset == 0 ? 1.0 : recOffset == 1 ? -8.0 : float(recOffset)) : hasMeasure ? 0.0 : estimatedBar and not na(buyerPercent) ? -4.0 : -1.0) : na,
-    "Diag 58 — source du tick affiché pour cette bougie : 0 son propre tableau, 1 le tableau de la bougie SUIVANTE (livré en retard), -5 la TRAÎNE du tableau de la bougie suivante (v11.46 : le prédécesseur transporté par un de ses premiers éléments — fin de bougie perdue par la livraison, retrouvée au tick livré suivant), -7 un prédécesseur transporté versé dans la RÉSERVE depuis un tableau figé (v11.47 : le sien ou un autre), -6 tick daté de la milliseconde de frontière attribué par NUMÉRO (option v11.47, qualité 2), k ≥ 2 le tableau de la bougie k−1 rangs AVANT elle (flux en avance ; sans limite depuis la v11.35, 4 rangs au plus jusqu'à la v11.34), -8 élément LIVRÉ de son propre tableau relu depuis la réserve (v11.66 : inatteignable par construction — tableau figé différent du tableau versé, Diag 10 — jusqu'ici affiché 1), -1 aucune mesure ni estimation affichée (valeur éventuellement reprise, ou courbe coupée ; traîne comprise) ; -2 et -3 (lecture de secours, v11.36 à v11.47) n'existent plus, -4 ESTIMATION depuis la clôture 10T (option v11.45 : pas une mesure). Le Diag 11 vaut 0 sur une bougie récupérée, 1 sur une fin récupérée (Diag 62, script « BSP Diag »)",
+    "Diag 58 — source du tick affiché pour cette bougie : 0 son propre tableau, 1 le tableau de la bougie SUIVANTE (livré en retard), -5 la TRAÎNE du tableau de la bougie suivante (v11.46 : le prédécesseur transporté par un de ses premiers éléments — fin de bougie perdue par la livraison, retrouvée au tick livré suivant), -7 un prédécesseur transporté versé dans la RÉSERVE depuis un tableau figé (v11.47 : le sien ou un autre), -6 tick daté de la milliseconde de frontière attribué par NUMÉRO (option v11.47, qualité 2), k ≥ 2 le tableau de la bougie k−1 rangs AVANT elle (flux en avance ; sans limite depuis la v11.35, 4 rangs au plus jusqu'à la v11.34), -8 élément LIVRÉ de son propre tableau relu depuis la réserve (v11.66 : inatteignable par construction — tableau figé différent du tableau versé, Diag 10 du script « BSP Diag » — jusqu'ici affiché 1), -1 aucune mesure ni estimation affichée (valeur éventuellement reprise, ou courbe coupée ; traîne comprise) ; -2 et -3 (lecture de secours, v11.36 à v11.47) n'existent plus, -4 ESTIMATION depuis la clôture 10T (option v11.45 : pas une mesure). Le Diag 11 vaut 0 sur une bougie récupérée, 1 sur une fin récupérée (Diag 62, script « BSP Diag »)",
     color = invisible, format = format.price, precision = 0, offset = -1, display = showDiagnostics ? display.data_window : display.none)
 
 plot(showDiagnostics and hasPrevBar and not na(buyerPercent) and not na(lastShownTime) ? float(exactUpper - lastShownTime) : na,
