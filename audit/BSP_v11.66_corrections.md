@@ -73,29 +73,46 @@ Acceptée le 11/10. Sur un graphique en ticks, `time_close` est na à l'exécuti
 d'une bougie en direct (mesuré par l'auteur : Diag 47 figé en direct), donc `time_close[1]`
 est na pendant N+1 : `prevCloseKnown` est faux, `ownUpper = time − 1` même verrou actif, et
 la lecture différée écartait le dernier tick de N daté de la milliseconde d'ouverture de
-N+1 — tick que le bord avait montré et qu'un rechargement relit (≈ 22 % des frontières en
-rafale le 25/09).
+N+1 — tick que le bord avait montré et qu'un rechargement relit (ordre de grandeur : Diag 63
+= 5 638 bougies sur 26 171 le 25/09, à l'historique ; non mesuré en direct).
 
-Correctif (lignes ~2280-2297) : verrou actif et clôture inconnue, le tableau propre est lu
-**comme au bord** — jusqu'à l'ouverture de N+1 incluse, sous le plafond de compte « premier
-numéro daté dès l'ouverture de N + 9 » ([DC]) :
+Correctif (lignes ~2290-2330) : verrou actif et clôture inconnue, la lecture stricte est
+**gardée** et seulement **prolongée** jusqu'à l'ouverture de N+1 incluse, sous le plafond de
+compte du bord (« premier numéro daté dès l'ouverture de N + 9 »), **et seulement si la
+tête de N est présente** (son premier numéro suit le dernier numéro connu de N−1, compté ou
+tracé) :
 
 ```pine
-bool liveOwnRead = hasPrevBar and blockSorted and closeIsLastTrade and not prevCloseKnown
+bool liveOwnRead = hasPrevBar and blockSorted and closeIsLastTrade and not prevCloseKnown and not edgeCapPrudent
 int liveScan = math.min(count1, SCAN_MAX)
 int liveFirstIndex = liveOwnRead and count1 > 0 ? firstIndexAtOrAfter(times1, prevOpen) : liveScan
-int liveOwnCap = liveOwnRead and liveFirstIndex < liveScan ? array.get(serial1, liveFirstIndex) + EXPECTED_TICKS - 1 : na
-int candidateIndex = not na(liveOwnCap) ? math.min(lastIndexAtOrBefore(times1, time), lastIndexAtOrBefore(serial1, liveOwnCap)) : ownUpper == exactUpper ? boundsLastIndex : lastIndexAtOrBefore(times1, ownUpper)
+int liveFirstSerial = liveOwnRead and liveFirstIndex < liveScan ? array.get(serial1, liveFirstIndex) : na
+bool liveHeadPresent = not na(liveFirstSerial) and ((not na(previousLastSerial) and liveFirstSerial <= previousLastSerial + 1) or (not na(lastShownSerial) and liveFirstSerial <= lastShownSerial + 1))
+int liveOwnCap = liveHeadPresent ? liveFirstSerial + EXPECTED_TICKS - 1 : na
+int candidateIndex = not na(liveOwnCap) ? math.max(boundsLastIndex, math.min(lastIndexAtOrBefore(times1, time), lastIndexAtOrBefore(serial1, liveOwnCap))) : …
 ```
 
-C'est plus sûr que le correctif d'une ligne proposé d'abord (`ownUpper = time`) : sans le
-plafond de compte, la série aurait pu prendre plusieurs ticks de N+1 datés de la même
-milliseconde et rangés en queue du tableau de N. Avec lui, la série suit exactement la
-règle du bord et hérite seulement de son risque déjà mesuré (premier tick de N perdu ET
-premier tick de N+1 à la milliseconde partagée dans le tableau de N : avance d'un tick,
-≈ 1 % des bougies au Diag 64 du 25/09). Historique (clôture connue) : rien ne change. Pour
-revenir à l'ancien comportement : remplacer `not na(liveOwnCap) ? … :` par rien dans
-`candidateIndex`.
+La première version (commit 9eaf4fa) lisait « comme au bord » sans garde ; la vérification
+contradictoire (4 relecteurs) y a trouvé cinq défauts, tous corrigés ici :
+1. le plafond pouvait lire **moins** qu'avant (retardataire de N−1 en tête du tableau, plus
+   de dix éléments) → `math.max(boundsLastIndex, …)` : jamais en deçà de la lecture stricte ;
+2. tête de N absente (graphique en retard sur le flux 1T) → la bougie close prenait un ou
+   **plusieurs** ticks de N+1 à CHAQUE bougie tant que dure le retard, pas « ≈ 1 % » →
+   garde de tête : sans tête prouvée, lecture stricte ;
+3. option « plafond prudent » : la série dépassait son propre bord → l'option garde la
+   lecture stricte ;
+4. Diag 12/33 en direct : une bougie à la milliseconde partagée comptait comme partielle de
+   9 → l'exclusion de cadence porte sur les bornes de contrôle (`boundsTailSkipped`) ;
+5. Diag 61 valait −1 ms sur ces bougies → borné à 0.
+Le « ≈ 1 % (Diag 64) » de la première rédaction était faux : le Diag 64 exige la clôture
+connue et ne peut rien compter là où la règle s'applique.
+
+Résidus écrits dans les LIMITES : tête absente ou inconnue → recul d'un tick comme avant ;
+plus de dix ticks pour une bougie (Diag 48, fin de séance) → le plafond peut admettre un tick
+de N+1 daté de son ouverture ; le tick lu à la milliseconde partagée reste hors des bornes de
+contrôle et la couverture (Diag 41/44, script Diag) le compte manquant en tête de N+1.
+Historique (clôture connue) : rien ne change. Pour revenir à l'ancien comportement :
+`bool liveOwnRead = false`.
 
 ## Corrections de comportement (sous options seulement)
 
@@ -262,7 +279,7 @@ fichier corrigé.
 | 6 | exécution | `firstTickOffsetMs` calculé à chaque exécution | 3 | v11.66 |
 | 7 | série | info-bulle « Garder la couleur » fausse pour l'estimation | 2 | v11.66 |
 | 8 | série | code mort de la lecture différée | 3 | DIAG_FULL, v11.66 |
-| 9 | série | verrou de clôture inerte en direct | 1 | correction 0, v11.66 (acceptée le 11/10) |
+| 9 | série | verrou de clôture inerte en direct | 1 | correction 0, v11.66 (acceptée le 11/10, gardée par la tête de N) |
 | 10 | bord | `valueMissingWithData` jamais lu | 2 | v11.66 |
 | 11 | bord | le bord ne lit pas sa propre traîne ; LIMITES fausse | 2 | LIMITES, v11.66 |
 | 12 | charge | réserve `var` restaurée à chaque mise à jour → `varip` | 2 | A/B à mesurer, non appliqué |

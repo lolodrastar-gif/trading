@@ -19,14 +19,17 @@
 //    VERROU ne bornait plus rien : la lecture différée s'arrêtait à
 //    l'ouverture de N+1 − 1 et écartait le dernier tick de N daté de la
 //    milliseconde partagée — que le bord avait montré et qu'un rechargement
-//    relit (≈ 22 % des frontières en rafale le 25/09). Désormais, verrou
-//    actif et clôture inconnue, le tableau propre est lu COMME AU BORD :
+//    relit (ordre de grandeur : Diag 63 = 5 638 bougies sur 26 171 le 25/09,
+//    à l'historique ; non mesuré en direct). Désormais, verrou actif et
+//    clôture inconnue, la lecture stricte est GARDÉE et seulement PROLONGÉE
 //    jusqu'à l'ouverture de N+1 incluse, sous le plafond de compte « premier
-//    numéro daté dès l'ouverture de N + 9 » ([DC]). Même règle que le bord,
-//    donc même risque, déjà mesuré au bord : premier tick de N perdu ET
-//    premier tick de N+1 daté de la milliseconde partagée rangé dans le
-//    tableau de N — la bougie close prend ce tick (Diag 64 du bord : ≈ 1 %
-//    des bougies le 25/09). Historique (clôture connue) : inchangé.
+//    numéro daté dès l'ouverture de N + 9 » ([DC]) — et seulement quand la
+//    tête de N est présente : son premier numéro suit le dernier numéro
+//    connu de N−1 (compté, ou tracé). Tête absente ou inconnue : lecture
+//    stricte, comme avant. Le plafond est alors exact (un numéro 1T par
+//    tick, Diag 12 = 10,00) : la bougie close ne prend jamais un tick de
+//    N+1, ne lit jamais moins qu'avant. Option « plafond prudent » cochée :
+//    inchangé. Historique (clôture connue) : inchangé.
 // 1. CORRECTIFS (options seulement) :
 //    — « Reprises strictes » : après la coupure (dix bougies sans tick), une
 //      bougie dont le tick est à ratio indéfini (calcul indéfini, reprise
@@ -954,8 +957,10 @@
 //    Le tick lu est le DERNIER élément de son tableau daté dans [ouverture,
 //    ownUpper]. ownUpper = clôture de N incluse dès que le VERROU est actif
 //    et la clôture connue (à l'historique) ; verrou actif et clôture inconnue
-//    (le direct, [DU]) : ouverture de N+1 incluse, sous le plafond de compte
-//    du bord (premier numéro daté dès l'ouverture de N + 9)
+//    (le direct, [DU]) : la lecture stricte, prolongée jusqu'à l'ouverture de
+//    N+1 incluse sous le plafond de compte du bord (premier numéro daté dès
+//    l'ouverture de N + 9) quand la tête de N est présente (ownUpper, lui,
+//    reste l'ouverture de N+1 − 1)
 //    (Diag 25 = 2 : une clôture a été observée antérieure à l'ouverture
 //    suivante, ce qui exclut que time_close soit toujours cette ouverture ;
 //    activation déduite hors première bougie de séance, jamais remise à
@@ -1111,13 +1116,18 @@
 // tick derrière le bord à une frontière partagée. EN DIRECT ([DU]),
 // time_close[1] est na pendant N+1 (time_close est na à l'exécution
 // confirmée d'une bougie sur un graphique en ticks, Diag 47) : verrou actif,
-// le tableau propre y est lu comme au bord — jusqu'à l'ouverture de N+1
-// incluse, sous le plafond « premier numéro daté dès l'ouverture de N + 9 ».
-// Il hérite du risque du bord : si le premier tick de N manque et que le
-// premier tick de N+1, daté de la milliseconde partagée, est rangé dans le
-// tableau de N, la bougie close le prend (avance d'un tick, ≈ 1 % des
-// bougies au Diag 64 du bord le 25/09) ; un rechargement, clôture connue,
-// lit jusqu'à la clôture sans plafond de compte. Pour la même raison, en
+// la lecture stricte (jusqu'à l'ouverture de N+1 − 1) y est prolongée
+// jusqu'à l'ouverture de N+1 incluse, sous le plafond « premier numéro daté
+// dès l'ouverture de N + 9 », si la tête de N est présente (son premier
+// numéro suit le dernier connu de N−1). Tête absente ou inconnue (graphique
+// en retard sur le flux 1T, fin de N−1 perdue et N−1 sans tick tracé) : le
+// dernier tick de N à la milliseconde partagée reste écarté, comme avant.
+// Plus de dix ticks pour une bougie (Diag 48, fin de séance à moins de dix)
+// : le plafond peut admettre un tick de N+1 daté de son ouverture. Le tick
+// lu à la milliseconde partagée est hors des bornes de contrôle (≤ ouverture
+// de N+1 − 1) : la couverture le compte manquant en tête de N+1 (Diag 41,
+// 44, script Diag). Un rechargement, clôture connue, lit jusqu'à la clôture
+// sans plafond de compte. Pour la même raison, en
 // direct, l'option « Frontière partagée : attribution par numéro »
 // (boundaryMs exige prevCloseKnown) et le Diag 64 du script Diag
 // (edgeAheadOfClose aussi) sont inactifs. Verrou actif ou non, deux
@@ -1228,8 +1238,8 @@
 //   rien n'y lit ; bord calculé sur la dernière bougie seulement ;
 //   dichotomies en double retirées ; tri du tableau figé mémorisé ;
 //   diagnostics décochés : display.none ; en direct, verrou actif et
-//   clôture inconnue, le tableau propre est lu comme au bord (dernier tick
-//   de N à la milliseconde partagée gardé). Moteur inchangé.
+//   clôture inconnue, la lecture stricte est prolongée à la milliseconde
+//   partagée sous le plafond de compte, tête de N présente. Moteur inchangé.
 // v11.65 [DT] régime des tracés (11 dans le principal, 59 dans « BSP Diag »,
 //   diagnostics décochés par défaut) ; comportement v11.63 rétabli (reprise
 //   jamais coupée, « Garder la couleur », bord au plafond propre, options
@@ -2355,26 +2365,42 @@ int ownUpper = closeIsLastTrade ? exactUpper : neighbourUpper
 // l'exécution confirmée d'une bougie en ticks, Diag 47), donc ownUpper =
 // ouverture de N+1 − 1 même verrou actif, et le dernier tick de N daté de la
 // milliseconde partagée — montré par le bord, relu au rechargement — était
-// écarté. Verrou actif et clôture inconnue : le tableau propre est lu comme
-// au bord, jusqu'à l'ouverture de N+1 INCLUSE et sous le plafond de compte
-// « premier numéro daté dès l'ouverture de N + 9 » ([DC]). Heures et numéros
-// étant triés ensemble (isSorted), le minimum des deux rangs est le dernier
-// élément qui respecte les deux bornes.
-bool liveOwnRead = hasPrevBar and blockSorted and closeIsLastTrade and not prevCloseKnown
+// écarté. Verrou actif et clôture inconnue : la lecture stricte est
+// prolongée, comme au bord, jusqu'à l'ouverture de N+1 INCLUSE et sous le
+// plafond de compte « premier numéro daté dès l'ouverture de N + 9 » ([DC]).
+// Heures et numéros étant triés ensemble (isSorted), le minimum des deux
+// rangs est le dernier élément qui respecte les deux bornes ; le maximum avec
+// la lecture stricte garde tout ce qu'elle lisait.
+// Garde de tête : le premier numéro daté dès l'ouverture de N suit le dernier
+// numéro connu de N−1 — compté dans ses bornes (previousLastSerial) ou tracé
+// (lastShownSerial) —, sinon le plafond pourrait admettre des ticks de N+1.
+// Jamais en deçà de la lecture stricte (math.max plus bas). Option « plafond
+// prudent » : lecture stricte, comme avant.
+// Dernier numéro compté pour la bougie précédente et dernier tick tracé — ou
+// invalidant — (heure, numéro) : déclarés ici (garde de tête ci-dessous) ;
+// mis à jour dans la couverture et au pont.
+var int previousLastSerial = na
+var int lastShownSerial = na
+var int lastShownTime = na
+bool liveOwnRead = hasPrevBar and blockSorted and closeIsLastTrade and not prevCloseKnown and not edgeCapPrudent
 int liveScan = math.min(count1, SCAN_MAX)
 int liveFirstIndex = liveOwnRead and count1 > 0 ? firstIndexAtOrAfter(times1, prevOpen) : liveScan
-int liveOwnCap = liveOwnRead and liveFirstIndex < liveScan ? array.get(serial1, liveFirstIndex) + EXPECTED_TICKS - 1 : na
+int liveFirstSerial = liveOwnRead and liveFirstIndex < liveScan ? array.get(serial1, liveFirstIndex) : na
+bool liveHeadPresent = not na(liveFirstSerial) and ((not na(previousLastSerial) and liveFirstSerial <= previousLastSerial + 1) or (not na(lastShownSerial) and liveFirstSerial <= lastShownSerial + 1))
+int liveOwnCap = liveHeadPresent ? liveFirstSerial + EXPECTED_TICKS - 1 : na
 
-// Tick lu : dernier élément du tableau de N daté dans [ouverture, ownUpper].
+// Tick lu : dernier élément du tableau de N daté dans [ouverture, ownUpper]
+// — en direct sous verrou, prolongé à l'ouverture de N+1 sous plafond ([DU]).
 // Un élément daté après la clôture est écarté et compté (Diag 27, 39).
 // boundsLastIndex : dernier élément ≤ exactUpper (bornes de contrôle, pour la
-// couverture) ; identique au tick lu dès que le Diag 25 vaut 2.
+// couverture) ; identique au tick lu dès que le Diag 25 vaut 2 et la clôture
+// est connue.
 int boundsLastIndex = lastIndexAtOrBefore(times1, exactUpper)
 int boundsLastTime = boundsLastIndex >= 0 ? array.get(times1, boundsLastIndex) : na
 bool boundsHasTick = hasPrevBar and blockSorted and boundsLastIndex >= 0 and boundsLastTime >= prevOpen
 // [DU] Même dichotomie que boundsLastIndex dès que ownUpper = exactUpper ;
 // en direct sous verrou, la lecture du bord (liveOwnCap, ci-dessus).
-int candidateIndex = not na(liveOwnCap) ? math.min(lastIndexAtOrBefore(times1, time), lastIndexAtOrBefore(serial1, liveOwnCap)) : ownUpper == exactUpper ? boundsLastIndex : lastIndexAtOrBefore(times1, ownUpper)
+int candidateIndex = not na(liveOwnCap) ? math.max(boundsLastIndex, math.min(lastIndexAtOrBefore(times1, time), lastIndexAtOrBefore(serial1, liveOwnCap))) : ownUpper == exactUpper ? boundsLastIndex : lastIndexAtOrBefore(times1, ownUpper)
 int candidateTime = candidateIndex >= 0 ? array.get(times1, candidateIndex) : na
 // La borne basse conditionne aussi l'acceptation : un tableau sans élément
 // dans [ouverture, clôture] n'est pas une source (Diag 17, 30).
@@ -2440,9 +2466,8 @@ bool headUnattributable = firstInBoundsIndex > 0 and not lowerBoundaryClear
 // cadenceUsable est assemblé plus bas, après serialOverlap.
 
 // Numéros du bloc DANS LES BORNES de N (déclarés ici, utilisés par la
-// couverture plus bas et par la frontière partagée [DF]) ; dernier numéro
-// compté pour la bougie précédente (var, mis à jour dans la couverture).
-var int previousLastSerial = na
+// couverture plus bas et par la frontière partagée [DF]) ; le dernier numéro
+// compté pour la bougie précédente (previousLastSerial) est déclaré plus haut.
 bool serialBlockUsable = boundsHasTick and firstInBoundsIndex <= boundsLastIndex
 int blockFirstSerial = serialBlockUsable ? array.get(serial1, firstInBoundsIndex) : na
 int blockLastSerial = serialBlockUsable ? array.get(serial1, boundsLastIndex) : na
@@ -2513,9 +2538,8 @@ int recOffset = not recFound ? -1 : bar_index - recSource
 bool neighbourUsable = recFound
 // Récupération [CD] : aucune lecture propre, un tick de N prouvé ailleurs.
 // Mémoire du dernier tick tracé — ou invalidant — (heure, numéro) : déclarée
-// ici, avant la garde des mesures ([CZ]) ; mise à jour au pont.
-var int lastShownSerial = na
-var int lastShownTime = na
+// plus haut (garde de tête du direct, [DU]), lue par la garde des mesures
+// ([CZ]) ; mise à jour au pont.
 // [DO] Heure du dernier VRAI tick du moteur qui a alimenté la série (mesure,
 // reprise rafraîchie, calcul indéfini, reprise invalidée) : l'estimation ne
 // la redate pas, contrairement à lastShownTime. Sert à la fenêtre en secondes
@@ -2679,7 +2703,11 @@ bool overCount = hasIntrabar and attributedCount > EXPECTED_TICKS
 bool ambiguousAttribution = (hasIntrabar and outOfBoundsCount > 0) or boundaryShared or boundaryLower or serialOverlap or recByCount
 // Compte LISIBLE = aucune ambiguïté DÉTECTÉE par ces critères, pas une preuve
 // d'appartenance de chaque tick (résidu [CT]).
-bool cadenceUsable = hasIntrabar and not countedToNextOpen and not boundaryLower and not headUnattributable and not serialOverlap and (prevCloseKnown or not skippedTail)
+// [DU] Clôture inconnue : l'exclusion porte sur les bornes de contrôle
+// (élément après ouverture de N+1 − 1), comme avant la lecture prolongée du
+// direct — un tick lu à l'ouverture de N+1 ne fait pas une bougie de 9.
+bool boundsTailSkipped = blockSorted and count1 > 0 and boundsLastIndex < count1 - 1
+bool cadenceUsable = hasIntrabar and not countedToNextOpen and not boundaryLower and not headUnattributable and not serialOverlap and (prevCloseKnown or not boundsTailSkipped)
 // Partielle : compte lisible inférieur à dix.
 bool partialBar = cadenceUsable and attributedCount < EXPECTED_TICKS
 
@@ -3471,8 +3499,8 @@ plot(showDiagnostics and hasPrevBar ? (fromNeighbour ? (recByCount ? -6.0 : recF
     "Diag 58 — source du tick affiché pour cette bougie : 0 son propre tableau, 1 le tableau de la bougie SUIVANTE (livré en retard), -5 la TRAÎNE du tableau de la bougie suivante (v11.46 : le prédécesseur transporté par un de ses premiers éléments — fin de bougie perdue par la livraison, retrouvée au tick livré suivant), -7 un prédécesseur transporté versé dans la RÉSERVE depuis un tableau figé (v11.47 : le sien ou un autre), -6 tick daté de la milliseconde de frontière attribué par NUMÉRO (option v11.47, qualité 2), k ≥ 2 le tableau de la bougie k−1 rangs AVANT elle (flux en avance ; sans limite depuis la v11.35, 4 rangs au plus jusqu'à la v11.34), -8 élément LIVRÉ de son propre tableau relu depuis la réserve (v11.66 : inatteignable par construction — tableau figé différent du tableau versé, Diag 10 du script « BSP Diag » — jusqu'ici affiché 1), -1 aucune mesure ni estimation affichée (valeur éventuellement reprise, ou courbe coupée ; traîne comprise) ; -2 et -3 (lecture de secours, v11.36 à v11.47) n'existent plus, -4 ESTIMATION depuis la clôture 10T (option v11.45 : pas une mesure). Le Diag 11 vaut 0 sur une bougie récupérée, 1 sur une fin récupérée (Diag 62, script « BSP Diag »)",
     color = invisible, format = format.price, precision = 0, offset = -1, display = showDiagnostics ? display.data_window : display.none)
 
-plot(showDiagnostics and hasPrevBar and not na(buyerPercent) and not na(lastShownTime) ? float(exactUpper - lastShownTime) : na,
-    "Diag 61 — âge de la valeur tracée pour cette bougie (ms) : sa clôture moins l'heure du tick dont vient la valeur — ou du tick qui l'a invalidée (calcul indéfini, reprise invalidée, v11.40). Près de 0 : mesure sur son dernier tick ; plus grand : ticks de fin manquants (avant la v11.46 : toute fin perdue ; depuis : fin perdue dont le prédécesseur transporté n'est pas admissible, ou n'est arrivé ni pendant N+1 ni dans le tableau de N lui-même), reprise rafraîchie ou reprise simple ; Sur une estimation (option), cet âge est synthétique : la valeur est datée de la borne stricte neighbourUpper (1 ms en frontière partagée), ou la date déjà mémorisée est conservée si cette borne ne progresse pas. Il ne mesure pas la fraîcheur d’un tick réel",
+plot(showDiagnostics and hasPrevBar and not na(buyerPercent) and not na(lastShownTime) ? float(math.max(exactUpper - lastShownTime, 0)) : na,
+    "Diag 61 — âge de la valeur tracée pour cette bougie (ms) : sa clôture moins l'heure du tick dont vient la valeur — ou du tick qui l'a invalidée (calcul indéfini, reprise invalidée, v11.40). Près de 0 : mesure sur son dernier tick ; plus grand : ticks de fin manquants (avant la v11.46 : toute fin perdue ; depuis : fin perdue dont le prédécesseur transporté n'est pas admissible, ou n'est arrivé ni pendant N+1 ni dans le tableau de N lui-même), reprise rafraîchie ou reprise simple ; Sur une estimation (option), cet âge est synthétique : la valeur est datée de la borne stricte neighbourUpper (1 ms en frontière partagée), ou la date déjà mémorisée est conservée si cette borne ne progresse pas. Il ne mesure pas la fraîcheur d’un tick réel. En direct, clôture inconnue, un tick lu à l'ouverture de la suivante (milliseconde partagée, v11.66) donne 0",
     color = invisible, format = format.price, precision = 0, offset = -1, display = showDiagnostics ? display.data_window : display.none)
 
 // [DT] DIAG-SECTION-END
