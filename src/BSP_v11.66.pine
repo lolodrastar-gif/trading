@@ -45,15 +45,23 @@
 //    Diag 58 : code −8 (élément LIVRÉ, trail = 0, relu depuis la réserve avec
 //    source = la bougie elle-même — un prédécesseur de la réserve reste −7 :
 //    inatteignable sauf tableau figé différent du tableau versé, Diag 10).
+//    Tri du tableau figé de N mémorisé à l'exécution confirmée de N : il
+//    n'est plus re-vérifié à chaque mise à jour de N+1 (même tableau, même
+//    taille, même bougie ; sinon re-vérifié). Diagnostics décochés, les sept
+//    lignes « Diag » n'apparaissent plus dans la fenêtre de données.
 // 4. ÉCARTÉ, documenté dans le rapport d'audit (audit/BSP_v11.65.1_audit.md
 //    et audit/BSP_v11.66_corrections.md) : varip sur la réserve (sortie
 //    identique en théorie, à mesurer en A/B au profileur), POOL_MAX /
-//    SCAN_MAX plus petits, cache du tri du tableau figé, lecture du tableau
-//    propre jusqu'à l'ouverture suivante quand time_close[1] est na en
-//    direct — chacun change une décision mesurée de l'auteur.
+//    SCAN_MAX plus petits (gain au chargement seulement, et POOL_MAX doit
+//    rester ≥ 2 × POOL_BLOCK_MAX + 64 : un tableau verse un élément ET son
+//    prédécesseur par rang), lecture du tableau propre jusqu'à l'ouverture
+//    suivante quand time_close[1] est na en direct (voir LIMITES, [DU]) —
+//    chacun change une décision mesurée de l'auteur ou le rendu par défaut.
 // SCRIPT « BSP Diag » : même fichier, DIAG_FULL = true et la section
-// DIAG-SECTION remplacée par la sienne ; tout ce qui est hors de cette section
-// (correctifs 1, textes 2, allègements 3) s'y retrouve tel quel par copie.
+// DIAG-SECTION remplacée par la sienne ; diffèrent aussi, par nécessité, le
+// titre et le nom court d'indicator(), le défaut (coché) et l'info-bulle de
+// « Afficher les diagnostics ». Tout le reste (correctifs 1, textes 2,
+// allègements 3) s'y retrouve tel quel par copie.
 // À reporter À LA MAIN dans sa section : les libellés des Diag 55 et 58 et la
 // branche « recOffset == 1 ? -8.0 » du Diag 58 (voir
 // audit/BSP_v11.66_corrections.md). Diagnostics décochés dans le jumeau : le
@@ -958,7 +966,8 @@
 //    le tick affiché change, le rattachement et la couverture restent sur le
 //    tableau propre.
 // 5. REPRISE. Bougie sans aucun tick prouvé : la valeur est TOUJOURS reprise,
-//    la courbe ne se coupe jamais. Reprise RAFRAÎCHIE ([CH]) : le tick du
+//    la courbe ne se coupe jamais (par défaut ; voir « Reprises strictes »
+//    ci-dessous). Reprise RAFRAÎCHIE ([CH]) : le tick du
 //    moteur le plus frais déjà reçu (mêmes sources), daté strictement avant
 //    l'ouverture de N+1, plus récent que la valeur tracée — heure postérieure,
 //    ou même heure et numéro supérieur — dans la même séance ; elle porte
@@ -969,8 +978,11 @@
 //    simples et rafraîchies ; une estimation garde sa propre couleur dans sa
 //    fenêtre, [DD]). Passée au
 //    gris, une reprise rafraîchie garde un remplissage gris ; seule une reprise
-//    simple n'a pas de remplissage ([CL]). Seuls le préchauffage, une première
-//    bougie de séance sans mesure et un contexte hors 1T coupent la courbe. CALCUL
+//    simple n'a pas de remplissage ([CL]). Par défaut, seuls le préchauffage,
+//    une première bougie de séance sans mesure et un contexte hors 1T coupent
+//    la courbe ; OPTION « Reprises strictes » ([DT], décochée) : toute reprise
+//    est grise tout de suite et la courbe est coupée au-delà de dix bougies
+//    sans tick du moteur, série et bord. CALCUL
 //    INDÉFINI ([CX], [CY]) : un tick retenu dont le moteur ne rend pas de
 //    ratio (marché plat en « Ratio des moyennes » ; HMA y est remplacée par
 //    WMA, effectiveAverageType) — mesure de toute
@@ -988,7 +1000,8 @@
 //    remplissage, ou un point si rien ne la relie) au tick le plus récent de
 //    son tableau ou de la réserve ([CX]), mêmes bornes que la série ; clôture
 //    inconnue (le cas normal) : tableau propre et réserve sous un plafond de
-//    compte ([CY], [DC]). Sans
+//    compte ([CY], [DC]) ; OPTION « plafond prudent » ([DT], décochée) : le
+//    plafond du tableau propre prend aussi celui de la réserve, par minimum. Sans
 //    tick, une reprise rafraîchie si un tick plus frais que la valeur tracée
 //    existe (invalidée, donc grise, si son ratio est indéfini), sinon la
 //    dernière bougie close, avec la politique de couleur et de remplissage de
@@ -1071,7 +1084,17 @@
 // indécidable : jamais lu pour N depuis un autre tableau (Diag 63) ; lu depuis
 // le tableau propre dès que le verrou est actif, et signalé (Diag 27, 39,
 // qualité 2). Tant que le verrou n'est pas actif, la série peut reculer d'un
-// tick derrière le bord à une frontière partagée. Verrou actif ou non, deux
+// tick derrière le bord à une frontière partagée. EN DIRECT ([DU]), le verrou
+// est sans effet : sur un graphique en ticks, time_close est na à l'exécution
+// confirmée d'une bougie (Diag 47), donc time_close[1] est na pendant N+1,
+// prevCloseKnown est faux et ownUpper = ouverture de N+1 − 1 — exactement le
+// cas « verrou inactif » : à une milliseconde partagée, la série écarte le
+// dernier tick de N que le bord a montré, et un rechargement (time_close
+// connu) le relira. Lecture du code, non mesurée ; non corrigé : lire le
+// tableau propre jusqu'à l'ouverture de N+1 incluse en direct supprimerait
+// ce recul au prix d'une avance d'un tick quand cet élément est en fait le
+// premier tick de N+1 (le bord accepte déjà ce risque, Diag 64) et
+// changerait le rendu par défaut. Verrou actif ou non, deux
 // autres reculs du bord à la série existent à une milliseconde partagée
 // (jumeau du rendu, v11.62) : le bord, qui ne connaît pas l'ouverture de
 // la suivante, peut montrer un tick de la RÉSERVE daté de la milliseconde
@@ -1440,7 +1463,7 @@ int showLastInput = input.int(
 bool keepBridgeColor = input.bool(
     true,
     "Garder la couleur sur une reprise",
-    tooltip = "Bougie sans aucun tick 1T livré : la valeur est TOUJOURS reprise, la courbe ne se coupe jamais ([BQ]) — c'est la couleur qui porte l'information.\n\nCOCHÉ (défaut) — une reprise garde l'état de la dernière mesure pendant dix bougies sans tick du moteur, puis passe au gris. Une reprise rafraîchie (tick plus frais trouvé ailleurs) remet la fenêtre à zéro.\n\nDÉCOCHÉ — toute reprise simple ou rafraîchie est grise tout de suite ; une ESTIMATION (option « Estimer les bougies sans tick ») garde sa propre couleur dans sa fenêtre, cette case ne la concerne pas.\n\nAucun prix manquant n'est reconstruit. Diag 21 et 22 (script « BSP Diag ») signalent les ponts. Pour couper la courbe au lieu de la reprendre : « Reprises strictes », en fin de liste.",
+    tooltip = "Bougie sans aucun tick 1T livré : la valeur est TOUJOURS reprise, la courbe ne se coupe jamais ([BQ]) — c'est la couleur qui porte l'information.\n\nCOCHÉ (défaut) — une reprise garde l'état de la dernière mesure pendant dix bougies sans tick du moteur, puis passe au gris. Une reprise rafraîchie (tick plus frais trouvé ailleurs) remet la fenêtre à zéro.\n\nDÉCOCHÉ — toute reprise simple ou rafraîchie est grise tout de suite ; une ESTIMATION (option « Estimer les bougies sans tick ») garde sa propre couleur dans sa fenêtre, cette case ne la concerne pas.\n\nAucun prix manquant n'est reconstruit. Diag 21 et 22 (script « BSP Diag ») signalent les ponts. Pour couper la courbe au lieu de la reprendre : « Reprises strictes », en fin de la section « 2 — Rendu 10T ».",
     group = G_RENDER)
 
 
@@ -2227,9 +2250,18 @@ bool oversizedBlock = count1 > PLAUSIBLE_TICK_CAP
 // par exécution. Un bloc non trié est écarté (aucune mesure) et compté au
 // Diag 49.
 bool blockAligned = array.size(raw1) == count1 and array.size(state1) == count1 and array.size(warm1) == count1 and array.size(context1) == count1 and array.size(reference1) == count1 and array.size(close1) == count1
-bool blockSorted = blockAligned and isSorted(times1, serial1)
+// [DU] Le tableau figé de N est le tableau vivant de N à son exécution
+// confirmée (même hypothèse que le versement unique, [DG]) : son tri y a été
+// vérifié et mémorisé (fin de script). Re-vérifié seulement si la mémoire ne
+// décrit pas cette bougie-là, avec cette taille-là.
+var int sortedMemoBar = na
+var int sortedMemoCount = na
+var bool sortedMemoValue = false
+bool frozenSortKnown = hasPrevBar and sortedMemoBar == bar_index - 1 and sortedMemoCount == count1
+bool blockSorted = blockAligned and (frozenSortKnown ? sortedMemoValue : isSorted(times1, serial1))
 bool curAligned = array.size(rawBuyerTicks) == count0 and array.size(stateTicks) == count0 and array.size(warmupTicks) == count0 and array.size(engineTimeframeTicks) == count0 and array.size(referenceTicks) == count0 and array.size(closeTicks) == count0 and array.size(trailRawTicks) == count0 and array.size(trailStateTicks) == count0 and array.size(trailWarmTicks) == count0 and array.size(trailReferenceTicks) == count0 and array.size(trailTimeTicks) == count0 and array.size(trailCloseTicks) == count0 and array.size(trailSerialTicks) == count0
-bool curSorted = curAligned and isSorted(timeTicks, serialTicks)
+bool curTimesSorted = isSorted(timeTicks, serialTicks)
+bool curSorted = curAligned and curTimesSorted
 
 // ── RÉSERVE ──
 // Déclarée ici, versée en FIN de script ([DG]) : chaque bougie y verse son
@@ -2726,8 +2758,9 @@ bool estimationHold = estimateHoldMs > 0 and not na(lastEngineTickTime) and exac
 bool estimationWindow = bridgeWindow or estimationHold
 // La courbe ne se coupe jamais ([BQ]) : la valeur est toujours reprise, la
 // COULEUR porte l'information — gris immédiatement (case décochée) ou après
-// la fenêtre. Seuls le préchauffage, une première bougie de séance sans
-// mesure et un contexte hors 1T coupent la courbe.
+// la fenêtre. Par défaut, seuls le préchauffage, une première bougie de
+// séance sans mesure et un contexte hors 1T coupent la courbe ; « Reprises
+// strictes » (option) la coupe aussi au-delà de dix bougies sans tick.
 // Une estimation garde sa couleur dans la fenêtre même case « Garder la
 // couleur » décochée : sa couleur est la sienne, pas un report.
 // [DT] « Reprises strictes » (option) : toute reprise grise tout de suite.
@@ -3359,37 +3392,40 @@ plot(
 // ============================================================================
 
 color invisible = #00000000
+// [DU] Diagnostics décochés : display.none (ternaire « input » sur chaque
+// tracé) — aucune ligne dans la fenêtre de données ; une valeur na y laissait
+// sept lignes vides aux titres d'un paragraphe.
 
 // [DT] DIAG-SECTION-BEGIN — script principal : sept diagnostics seulement.
 // Les 59 sont dans « BSP Diag v11.65 » (même moteur, cette section remplacée).
 
 plot(showDiagnostics ? (hasIntrabar ? 1.0 : 0.0) : na,
     "Diag 11 — tick lu dans le tableau de la bougie (0/1)",
-    color = invisible, format = format.price, precision = 0, offset = -1, display = display.data_window)
+    color = invisible, format = format.price, precision = 0, offset = -1, display = showDiagnostics ? display.data_window : display.none)
 
 plot(showDiagnostics ? averageTicksPerBar : na,
-    "Diag 12 — ticks 1T comptés dans les bornes, par bougie close au compte lisible (moyenne ; effectif au Diag 32) : aucune ambiguïté DÉTECTÉE par les critères de cadence — ni compte atteignant l'ouverture de la suivante, ni lecture datée de l'ouverture ou retardataires d'avant l'ouverture sans clôture précédente connue antérieure, ni numéro déjà compté pour la précédente (v11.34) ; clôture inconnue (Diag 25 = 0) : tout élément daté de l'ouverture suivante ou après exclut. Un excédent après la clôture n'exclut plus la bougie (v11.33). Ce n'est pas une preuve d'appartenance : un retardataire daté de l'ouverture partagée, livré dans ce seul tableau, peut compléter un compte de dix. Au-dessus de 10,00 : écart de compte non expliqué entre le flux 1T et le graphique (voir Diag 48)",
-    color = invisible, format = format.price, precision = 2, offset = -1, display = display.data_window)
+    "Diag 12 — ticks 1T comptés dans les bornes, par bougie close au compte lisible (moyenne ; effectif au Diag 32 du script « BSP Diag ») : aucune ambiguïté DÉTECTÉE par les critères de cadence — ni compte atteignant l'ouverture de la suivante, ni lecture datée de l'ouverture ou retardataires d'avant l'ouverture sans clôture précédente connue antérieure, ni numéro déjà compté pour la précédente (v11.34) ; clôture inconnue (Diag 25 = 0, script « BSP Diag ») : tout élément daté de l'ouverture suivante ou après exclut. Un excédent après la clôture n'exclut plus la bougie (v11.33). Ce n'est pas une preuve d'appartenance : un retardataire daté de l'ouverture partagée, livré dans ce seul tableau, peut compléter un compte de dix. Au-dessus de 10,00 : écart de compte non expliqué entre le flux 1T et le graphique (voir Diag 48, script « BSP Diag »)",
+    color = invisible, format = format.price, precision = 2, offset = -1, display = showDiagnostics ? display.data_window : display.none)
 
 plot(showDiagnostics ? float(noMeasureBarCount) : na,
     "Diag 30 — bougies closes sans valeur mesurée (trous, calculs indéfinis, ticks dépassés ; pontées ou non)",
-    color = invisible, format = format.price, precision = 0, offset = -1, display = display.data_window)
+    color = invisible, format = format.price, precision = 0, offset = -1, display = showDiagnostics ? display.data_window : display.none)
 
 plot(showDiagnostics ? float(partialBarCount) : na,
-    "Diag 33 — bougies closes partielles : moins de dix ticks comptés dans les bornes, sur les bougies au compte lisible du Diag 32 (v11.33 : un excédent après la clôture n'exclut plus)",
-    color = invisible, format = format.price, precision = 0, offset = -1, display = display.data_window)
+    "Diag 33 — bougies closes partielles : moins de dix ticks comptés dans les bornes, sur les bougies au compte lisible du Diag 32 (script « BSP Diag » ; v11.33 : un excédent après la clôture n'exclut plus)",
+    color = invisible, format = format.price, precision = 0, offset = -1, display = showDiagnostics ? display.data_window : display.none)
 
 plot(showDiagnostics ? (curCapUnavailable ? -2.0 : not curSorted and not edgeFresh ? -3.0 : edgeVisible ? (edgeFresh ? (curSourceKind == 1 ? 4.0 : 1.0) : edgeRefreshed ? 2.0 : curUndefined ? 3.0 : edgeRefreshUndefined ? 6.0 : edgeEstimated ? 8.0 : curStale ? 7.0 : 0.0) : -1.0) : na,
     "Diag 55 — bord vivant : -2 (option « plafond prudent ») aucune base de numéro antérieure pour borner le bord, -3 bloc courant invalide ; 1 mesure fraîche de son PROPRE tableau, 4 mesure fraîche prise dans la RÉSERVE (v11.40 : sous le plafond de compte si la clôture est inconnue ; v11.47 : prédécesseurs transportés compris), (5, lecture de secours, retiré en v11.48), 2 reprise RAFRAÎCHIE au bord (v11.39), 3 calcul indéfini (valeur reprise, gris, v11.39 ; valeur de la lecture propre si elle est définie, v11.41), 6 reprise INVALIDÉE (valeur reprise, gris, v11.40), 7 tick DÉPASSÉ (pas plus récent que le dernier tracé ou invalidant : reprise, v11.41 ; depuis la v11.57, 8 l'emporte si une estimation est affichée), 8 ESTIMATION depuis l'OHLC de la bougie en formation (option v11.45), 0 reprise simple affichée (rien à comparer), -1 rien d'affiché au bord (début de séance, démarrage, préchauffage, hors 1T, courbe coupée par « Reprises strictes »), NON décalé",
-    color = invisible, format = format.price, precision = 0, display = display.data_window)
+    color = invisible, format = format.price, precision = 0, display = showDiagnostics ? display.data_window : display.none)
 
 plot(showDiagnostics and hasPrevBar ? (fromNeighbour ? (recByCount ? -6.0 : recFromTrail ? -5.0 : recFromPoolTrail ? -7.0 : recOffset == 0 ? 1.0 : recOffset == 1 ? -8.0 : float(recOffset)) : hasMeasure ? 0.0 : estimatedBar and not na(buyerPercent) ? -4.0 : -1.0) : na,
-    "Diag 58 — source du tick affiché pour cette bougie : 0 son propre tableau, 1 le tableau de la bougie SUIVANTE (livré en retard), -5 la TRAÎNE du tableau de la bougie suivante (v11.46 : le prédécesseur transporté par un de ses premiers éléments — fin de bougie perdue par la livraison, retrouvée au tick livré suivant), -7 un prédécesseur transporté versé dans la RÉSERVE depuis un tableau figé (v11.47 : le sien ou un autre), -6 tick daté de la milliseconde de frontière attribué par NUMÉRO (option v11.47, qualité 2), k ≥ 2 le tableau de la bougie k−1 rangs AVANT elle (flux en avance ; sans limite depuis la v11.35, 4 rangs au plus jusqu'à la v11.34), -8 élément LIVRÉ de son propre tableau relu depuis la réserve (v11.66 : inatteignable par construction — tableau figé différent du tableau versé, Diag 10 — jusqu'ici affiché 1), -1 aucune mesure ni estimation affichée (valeur éventuellement reprise, ou courbe coupée ; traîne comprise) ; -2 et -3 (lecture de secours, v11.36 à v11.47) n'existent plus, -4 ESTIMATION depuis la clôture 10T (option v11.45 : pas une mesure). Le Diag 11 vaut 0 sur une bougie récupérée, 1 sur une fin récupérée (Diag 62)",
-    color = invisible, format = format.price, precision = 0, offset = -1, display = display.data_window)
+    "Diag 58 — source du tick affiché pour cette bougie : 0 son propre tableau, 1 le tableau de la bougie SUIVANTE (livré en retard), -5 la TRAÎNE du tableau de la bougie suivante (v11.46 : le prédécesseur transporté par un de ses premiers éléments — fin de bougie perdue par la livraison, retrouvée au tick livré suivant), -7 un prédécesseur transporté versé dans la RÉSERVE depuis un tableau figé (v11.47 : le sien ou un autre), -6 tick daté de la milliseconde de frontière attribué par NUMÉRO (option v11.47, qualité 2), k ≥ 2 le tableau de la bougie k−1 rangs AVANT elle (flux en avance ; sans limite depuis la v11.35, 4 rangs au plus jusqu'à la v11.34), -8 élément LIVRÉ de son propre tableau relu depuis la réserve (v11.66 : inatteignable par construction — tableau figé différent du tableau versé, Diag 10 — jusqu'ici affiché 1), -1 aucune mesure ni estimation affichée (valeur éventuellement reprise, ou courbe coupée ; traîne comprise) ; -2 et -3 (lecture de secours, v11.36 à v11.47) n'existent plus, -4 ESTIMATION depuis la clôture 10T (option v11.45 : pas une mesure). Le Diag 11 vaut 0 sur une bougie récupérée, 1 sur une fin récupérée (Diag 62, script « BSP Diag »)",
+    color = invisible, format = format.price, precision = 0, offset = -1, display = showDiagnostics ? display.data_window : display.none)
 
 plot(showDiagnostics and hasPrevBar and not na(buyerPercent) and not na(lastShownTime) ? float(exactUpper - lastShownTime) : na,
     "Diag 61 — âge de la valeur tracée pour cette bougie (ms) : sa clôture moins l'heure du tick dont vient la valeur — ou du tick qui l'a invalidée (calcul indéfini, reprise invalidée, v11.40). Près de 0 : mesure sur son dernier tick ; plus grand : ticks de fin manquants (avant la v11.46 : toute fin perdue ; depuis : fin perdue dont le prédécesseur transporté n'est pas admissible, ou n'est arrivé ni pendant N+1 ni dans le tableau de N lui-même), reprise rafraîchie ou reprise simple ; Sur une estimation (option), cet âge est synthétique : la valeur est datée de la borne stricte neighbourUpper (1 ms en frontière partagée), ou la date déjà mémorisée est conservée si cette borne ne progresse pas. Il ne mesure pas la fraîcheur d’un tick réel",
-    color = invisible, format = format.price, precision = 0, offset = -1, display = display.data_window)
+    color = invisible, format = format.price, precision = 0, offset = -1, display = showDiagnostics ? display.data_window : display.none)
 
 // [DT] DIAG-SECTION-END
 // ============================================================================
@@ -3421,4 +3457,9 @@ if barstate.isconfirmed
         int absorbFrom = curCloseKnown ? math.max(firstIndexAtOrAfter(timeTicks, time_close) - 1, 0) : 0
         tickPool := poolAbsorb(tickPool, timeTicks, serialTicks, rawBuyerTicks, stateTicks, warmupTicks, engineTimeframeTicks, closeTicks, referenceTicks, trailTimeTicks, trailSerialTicks, trailRawTicks, trailStateTicks, trailWarmTicks, trailCloseTicks, trailReferenceTicks, bar_index, absorbFrom)
     lastConfirmedCount := DIAG_FULL ? count0 : int(na)
+    // [DU] Tri mémorisé pour la lecture différée de cette bougie (blockSorted).
+    // curTimesSorted et non curSorted : blockAligned ne vérifie pas la traîne.
+    sortedMemoBar := bar_index
+    sortedMemoCount := count0
+    sortedMemoValue := curTimesSorted
 lastEdgeShownTime := DIAG_FULL and edgeFresh ? curCandidateTime : na
