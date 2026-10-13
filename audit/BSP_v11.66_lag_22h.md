@@ -120,3 +120,17 @@ Ces fichiers sont temporaires : après les tests, remettre la v11.66, ou la v11.
 ## 7. Ce qui n'a pas changé
 
 La v11.66 installée reste la bonne version. Aucune correction de code n'est justifiée par cet audit : il n'y a pas de boucle qui explose, pas de chemin d'erreur, pas de poste caché dans le corps du script. Ce qui reste à mesurer est entre le script et l'écran, et seuls les tests du §4 peuvent le désigner.
+
+## 8. Résolution (13/10, soir)
+
+Observation de l'utilisateur : page rechargée vers 21:45, clôture de 22:00 sans aucun lag, setup complet, BSP v11.66 en place.
+
+Conclusion : la cause est l'**onglet du navigateur chargé depuis le matin**, pas le script. Un graphique TradingView garde en mémoire, côté navigateur, toutes les bougies reçues en direct depuis le chargement de la page, avec les valeurs de chaque indicateur (sur un 10T de NQ : 100 000 à 200 000 bougies par jour). Le script est borné (barres calculées, barres dessinées, réserve purgée) ; le graphique et l'onglet ne le sont pas. La rafale de 22:00 (≈ 100 bougies/s) sature un onglet qui traîne la journée entière, et passe sur un onglet frais.
+
+Routine retenue :
+
+1. Recharger la page vers 21:40, chaque jour (pas à 21:58 : le rechargement du BSP dure plusieurs secondes). Après une session de nuit, idem vers 15:20.
+2. « Barres calculées » (section Calcul) à 1 500 et « Historique 1T demandé » à 25 000 : rechargement plus court, rien ne change en direct.
+3. Moins d'onglets et de graphiques ouverts en parallèle.
+
+Les versions de test du §6 n'ont pas eu à servir ; elles restent dans `src/test/` si le lag réapparaissait sur un onglet frais, ce qui désignerait alors un autre maillon (§4). La v11.66 reste la version installée.
