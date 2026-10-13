@@ -111,7 +111,7 @@ Lecture :
 - « chiffres sur l'échelle » : décochée, les deux tracés d'échelle sont en `display.none`.
 - « courbes et remplissage » : décochée, les deux courbes et le remplissage sont en `display.none`.
 
-`src/test/BSP_v11.66_perf_varip.pine` : le même fichier, un seul mot changé (ligne 2369) : `varip array<Tick> tickPool`. Sorties identiques, prouvé par les relecteurs : la réserve n'est écrite qu'à l'exécution confirmée (3553), qui est la dernière de la bougie ; aucune exécution intermédiaire ne la modifie ; `var` et `varip` y laissent donc le même contenu. Seul le mécanisme de retour en arrière change. Si le compilateur refuse `varip` sur un tableau de type utilisateur, le dire : la variante tombe, pas le reste.
+`src/test/BSP_v11.66_perf_varip.pine` : le même fichier, un seul mot changé (ligne 2380) : `varip array<Tick> tickPool`. Sorties identiques, prouvé par les relecteurs : la réserve n'est écrite qu'à l'exécution confirmée (3553), qui est la dernière de la bougie ; aucune exécution intermédiaire ne la modifie ; `var` et `varip` y laissent donc le même contenu. Seul le mécanisme de retour en arrière change. Si le compilateur refuse `varip` sur un tableau de type utilisateur, le dire : la variante tombe, pas le reste.
 
 Les ternaires `display = … ? … : display.none` sont la construction déjà compilée dans la v11.66 (Diag). Le paramètre `display` de `fill()` existe en v6. Pine non compilé ici : signaler toute erreur avec son numéro de ligne.
 
