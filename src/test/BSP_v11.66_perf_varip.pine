@@ -2,10 +2,14 @@
 // ============================================================================
 // BSP v11.66-perf-varip — VERSION DE TEST POUR LA RAFALE DE 22:00 (13/10). TEMPORAIRE.
 // ============================================================================
-// Même code que la v11.66, plus trois cases de test en fin de liste (groupe
+// Même code que la v11.66, plus quatre cases de test en fin de liste (groupe
 // « 6 — Tests 22h »), toutes COCHÉES par défaut (rendu identique à la v11.66) :
-//   — « dessiner le bord vivant » : décochée, aucune ligne, étiquette ni
-//     remplissage du bord n'est mis à jour (5 à 9 objets de dessin par tick) ;
+//   — « calculer le bord vivant » : décochée, le bord n'est plus calculé
+//     (3 à 5 dichotomies sur la réserve et le tableau vivant par tick) ni
+//     dessiné ; l'échelle suit la bougie close ;
+//   — « dessiner le bord vivant » : décochée, le bord est encore calculé mais
+//     aucune ligne, étiquette ni remplissage n'est mis à jour (5 à 9 objets de
+//     dessin par tick) ; l'échelle suit encore le bord ;
 //   — « chiffres sur l'échelle » : décochée, les deux tracés d'échelle sont en
 //     display.none ;
 //   — « courbes et remplissage » : décochée, les deux courbes et le remplissage
@@ -1655,13 +1659,20 @@ bool strictBridges = input.bool(
     tooltip = "DÉCOCHÉ (défaut, v11.63) — la courbe ne se coupe jamais ([BQ]) : une bougie sans tick reprend la dernière valeur, colorée dans la fenêtre si « Garder la couleur », grise ensuite.\n\nCOCHÉ (v11.64) — toute reprise est grise tout de suite et la courbe est COUPÉE après dix bougies consécutives sans tick du moteur. En rafale (clôture de New York), TradingView ne livre parfois aucun tick 1T pendant 27 à 164 bougies 10T d'affilée : la courbe y montre alors des trous de 0,3 à 1,6 s. Au bord vivant, même règle.",
     group = G_RENDER)
 
-// TESTS 22h (version perf, temporaire) : trois interrupteurs de SORTIE, tous
-// cochés par défaut — rendu identique à la v11.66. Décocher un seul à la fois
-// pendant une rafale et noter si le lag change (audit/BSP_v11.66_lag_22h.md).
+// TESTS 22h (version perf, temporaire) : quatre interrupteurs, tous cochés par
+// défaut — rendu identique à la v11.66. En décocher UN SEUL, AVANT la rafale
+// (changer un réglage recharge tout l'historique : jamais pendant), et noter
+// si le lag change (audit/BSP_v11.66_lag_22h.md).
+bool perfEdgeCompute = input.bool(
+    true,
+    "Test : calculer le bord vivant",
+    tooltip = "TEST 22h. Décoché : le bord vivant n'est ni calculé (ses dichotomies sur la réserve et le tableau vivant, à chaque tick, côté serveur) ni dessiné. Les chiffres de l'échelle suivent la dernière bougie close. Si le lag disparaît ici mais pas avec « dessiner » seul décoché, c'est le CALCUL du bord (serveur) ; s'il disparaît aussi avec « dessiner » seul, c'est le DESSIN (navigateur).",
+    group = G_PERF)
+
 bool perfEdgeDraw = input.bool(
     true,
     "Test : dessiner le bord vivant",
-    tooltip = "TEST 22h. Décoché : le bord vivant n'est plus calculé ni dessiné (plus aucune mise à jour de ligne, d'étiquette ou de remplissage à chaque tick). Les courbes closes et leurs chiffres d'échelle restent. Si le lag disparaît, ce sont les objets de dessin du bord qui pèsent dans le navigateur.",
+    tooltip = "TEST 22h. Décoché : le bord vivant est encore calculé (l'échelle le suit toujours) mais plus dessiné : aucune mise à jour de ligne, d'étiquette ou de remplissage à chaque tick. Si le lag disparaît, ce sont les objets de dessin du bord qui pèsent dans le navigateur.",
     group = G_PERF)
 
 bool perfAxisPlots = input.bool(
@@ -3287,7 +3298,7 @@ fill(
 // 64 du script Diag. Hors de ces cas, ses dichotomies sont épargnées —
 // gain au (re)chargement seulement : en direct, barstate.islast est vrai à
 // chaque exécution.
-bool edgeNeeded = (barstate.islast and perfEdgeDraw) or showDiagnostics
+bool edgeNeeded = (barstate.islast and perfEdgeCompute) or showDiagnostics
 bool curCloseKnown = not na(time_close) and time_close >= time
 int curUpper = curCloseKnown ? time_close : na
 int edgeBaseRank = edgeNeeded ? poolLastAtOrBefore(tickPool, time - 1) : -1
@@ -3448,7 +3459,7 @@ var linefill edgeFill = linefill.new(edgeBuyerLine, edgeSellerLine, color.new(#8
 var label edgeBuyerDot = label.new(0, 50.0, "", xloc = xloc.bar_index, style = label.style_circle, color = color.new(#8A8A9A, 100), textcolor = color.new(#8A8A9A, 100), size = size.tiny)
 var label edgeSellerDot = label.new(0, 50.0, "", xloc = xloc.bar_index, style = label.style_circle, color = color.new(#8A8A9A, 100), textcolor = color.new(#8A8A9A, 100), size = size.tiny)
 // edgeVisible hors du bloc : le Diag 55 lit la visibilité réelle du bord.
-bool edgeVisible = perfEdgeDraw and hasPrevBar and not na(edgeBuyer) and not curWrongContext
+bool edgeVisible = perfEdgeCompute and hasPrevBar and not na(edgeBuyer) and not curWrongContext
 if barstate.islast and perfEdgeDraw
     bool startFromClosed = not na(buyerPercent)
     bool edgeIsolated = edgeVisible and not startFromClosed
