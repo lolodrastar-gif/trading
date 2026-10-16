@@ -134,3 +134,22 @@ Routine retenue :
 3. Moins d'onglets et de graphiques ouverts en parallèle.
 
 Les versions de test du §6 n'ont pas eu à servir ; elles restent dans `src/test/` si le lag réapparaissait sur un onglet frais, ce qui désignerait alors un autre maillon (§4). La v11.66 reste la version installée.
+
+## 9. Suite (14-16/10) : le rechargement ne suffit pas
+
+Le §8 concluait trop vite sur une seule clôture sans lag. Observations suivantes de l'utilisateur :
+
+- le lag revient, même page rechargée, et aussi **en séance** lors de gros mouvements : tout le setup se décale d'environ 2 s, puis rattrape ;
+- un **graphique témoin** (NQ 10T nu, sans indicateur, dans un autre navigateur) **ne lag jamais** au même moment : flux TradingView, réseau et machine (Ryzen 9 9700X, 32 Go) hors de cause ;
+- le layout contient **deux graphiques en ticks dans le même onglet** (prix à gauche ; BSP + deux oscillateurs à droite), donc un seul fil d'exécution pour les deux ;
+- pendant ces épisodes, « Afficher les diagnostics » était **cochée**, la **fenêtre de données ouverte**, l'**éditeur Pine** (et le Profiler) ouverts ; « Historique 1T demandé » à 50 000 et « Barres calculées » à 5 000 pour 987 barres dessinées.
+
+Lecture : une file d'attente sur le fil de l'onglet (le retard se résorbe seul quand le débit retombe), alimentée par plusieurs charges simultanées. Les captures du Profiler ne tranchent pas : cumulées depuis le chargement, elles montrent surtout le moteur sur l'historique.
+
+Configuration appliquée le 16/10, sans changer une ligne de la v11.66 :
+
+1. diagnostics décochés, fenêtre de données fermée, éditeur Pine et Profiler fermés ;
+2. « Historique 1T demandé » 28 957 et « Barres calculées » 1 597 (règle : 10 × barres calculées + 43 × longueur ≥ 26 000 ; les 987 barres dessinées restent identiques) ;
+3. page rechargée après ces changements.
+
+Si le lag persiste dans cette configuration : test de l'œil sur le BSP (dessin contre calcul), puis séparation des deux graphiques dans deux profils de navigateur (un processus, donc un cœur, par graphique), puis les cases de `src/test/BSP_v11.66_perf.pine` pour isoler la partie du dessin qui pèse.
