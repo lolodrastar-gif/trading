@@ -153,3 +153,10 @@ Configuration appliquée le 16/10, sans changer une ligne de la v11.66 :
 3. page rechargée après ces changements.
 
 Si le lag persiste dans cette configuration : test de l'œil sur le BSP (dessin contre calcul), puis séparation des deux graphiques dans deux profils de navigateur (un processus, donc un cœur, par graphique), puis les cases de `src/test/BSP_v11.66_perf.pine` pour isoler la partie du dessin qui pèse.
+
+## 10. 20/10 : le lag revient en configuration propre ; une limite mémoire dans Edge
+
+- 20/10 vers 17:12, configuration propre (§9) : nouveau décrochage de ~2 s en séance ; une extension de mesure a relevé un blocage du fil de l'onglet de 722 ms ; le témoin nu est resté fluide ; un rechargement a rétabli la fluidité. Navigateur : Microsoft Edge.
+- Trouvé ensuite dans Edge (`edge://settings/system`, « Contrôles des ressources ») : **limite de mémoire du navigateur fixée à 3 Go, toujours active**, dépassée (3,7 Go utilisés), six onglets endormis par Edge. Une limite basse déclenche des récupérations de mémoire forcées (onglets endormis, nettoyages agressifs dans les pages), ce qui est compatible avec un blocage long sur un onglet au tas devenu gros au fil de la journée, et avec un rechargement qui règle tout.
+
+Actions retenues, sans toucher au BSP ni au layout : désactiver la limite (ou la porter au maximum), exclure tradingview.com de la mise en veille des onglets, redémarrer Edge, puis observer. Si 22:00 déborde encore malgré cela : séparation du prix et du BSP dans deux profils, sur une copie du layout (§9).
