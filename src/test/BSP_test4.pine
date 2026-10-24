@@ -2159,8 +2159,8 @@ color edgeFillColor = not showFill or edgeBareCarry ? color.new(neutralColor, 10
 color hiddenColor = color.new(neutralColor, 100)
 
 // Égalité explicite, y compris si les deux couleurs valent na.
-edgeSameColor(color first, color second) =>
-    na(first) ? na(second) : not na(second) and first == second
+edgeSameColor(color colorA, color colorB) =>
+    na(colorA) ? na(colorB) : not na(colorB) and colorA == colorB
 
 // Les entrées restent fixes pendant une exécution complète du script.
 // Calcul/dessin désactivé : aucun objet de bord à créer ou à masquer.
