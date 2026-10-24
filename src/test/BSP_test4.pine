@@ -1,0 +1,2346 @@
+//@version=6
+// BSP test4 — bord vivant optimisé, candidat du 24/10/2026.
+// Base exacte : script BSP test3 renvoyé par l'utilisateur le 24/10.
+// Bord calculé et dessiné par défaut, conformément au choix de l'utilisateur.
+// Moteur, réserve, recherches natives, récupération et courbes closes conservés.
+// Le rendu suit chaque exécution : aucune temporisation ni perte volontaire de tick.
+// Cinq objets réutilisés ; couleurs inchangées non réappliquées inutilement.
+// Les caches sont des var ordinaires, restaurées avec les objets au rollback.
+// Objets créés seulement si le calcul ET le dessin sont activés, à bar_index.
+// Recherches et lectures du bord omises quand elles ne peuvent pas servir.
+// Vérifications de source et modèles locaux ; Pine non compilé ici.
+// Gain de latence et comportement en direct à mesurer dans TradingView.
+// Coller le fichier entier ; voir audit/BSP_test4_bord_optimise.md.
+// [Transcription du 24/10 : le reste de l'en-tête fourni, historique des
+// versions, n'est pas recopié ici.]
+
+indicator(
+    title = "Buyers & Sellers Pressure — BSP test4 — bord vivant optimisé",
+    shorttitle = "BSP test4",
+    overlay = false,
+    format = format.percent,
+    precision = 2,
+    calc_bars_count = 5000)
+
+// ============================================================================
+// CONSTANTES ET GROUPES
+// ============================================================================
+
+const string G_ENGINE = "1 — Moteur BSP 1T"
+const string G_RENDER = "2 — Rendu 10T"
+const string G_COLORS = "3 — Trois couleurs"
+const string G_DIAG = "4 — Diagnostic"
+const string G_AXIS = "5 — Chiffres sur l'échelle de prix"
+const string G_PERF = "6 — Tests 22h (temporaires)"
+
+const string MODE_MEAN_RATIO = "Moyenne du ratio"
+const string MODE_RATIO_MEANS = "Ratio des moyennes"
+
+const string ENGINE_TIMEFRAME = "1T"
+const int EXPECTED_TICKS = 10
+// Historique 1T demandé : un réglage depuis la v11.53 (tickHistoryInput, 25e
+// réglage, [DL]) ; 100 000 fixes jusqu'à la v11.52.
+// Seuils en PAS DE COTATION : Pine compare à neuf décimales, un seuil de 1e-10
+// y vaudrait zéro.
+const float MIN_MOVE_TICKS = 0.5
+const float MIN_RANGE_TICKS = 0.00000001
+const float MIN_STRONG_SPREAD = 10.0
+const float VISUAL_RANGE_FACTOR = 3.0
+const int PLAUSIBLE_TICK_CAP = 25
+// Fenêtre du pont : bougies consécutives sans aucun tick du moteur (mesure ou
+// reprise rafraîchie) qui gardent leur couleur ; au-delà, gris.
+const int BRIDGE_MAX_BARS = 10
+
+// Opacité stable : lissage de la force, paliers de transparence, hystérésis.
+const int OPACITY_SMOOTHING = 5
+const int OPACITY_LEVELS = 3
+const float OPACITY_HYSTERESIS = 0.15
+
+
+// ============================================================================
+// RÉGLAGES — MOTEUR 1T
+// ============================================================================
+
+int lengthInput = input.int(
+    233,
+    "Longueur (ticks 1T)",
+    minval = 2,
+    maxval = 500,
+    tooltip = "La longueur est comptée en ticks 1T. HMA 24 signifie donc 24 ticks, et non 24 bougies de 10 ticks.\n\nPOUR CONVERTIR : à dix ticks par bougie, cette longueur couvre longueur / 10 bougies 10T (23,3 pour 233). Le Diag 12 dit si le flux délivre réellement dix ticks par bougie.",
+    group = G_ENGINE)
+
+string averageType = input.string(
+    "RMA",
+    "Type de moyenne",
+    options = ["HMA", "WMA", "EMA", "SMA", "RMA"],
+    tooltip = "HMA peut dépasser 0–100 en Moyenne du ratio (valeur écrêtée). En Ratio des moyennes, HMA est automatiquement remplacée par WMA pour éviter un dénominateur négatif. RMA, EMA, SMA et WMA restent inchangées.",
+    group = G_ENGINE)
+
+string measureMode = input.string(
+    MODE_RATIO_MEANS,
+    "Mode de mesure",
+    options = [MODE_MEAN_RATIO, MODE_RATIO_MEANS],
+    tooltip = "Moyenne du ratio : chaque tick compte pareil. Ratio des moyennes : les variations de prix les plus grandes pèsent davantage.",
+    group = G_ENGINE)
+
+bool rangeWeightedMode = measureMode == MODE_RATIO_MEANS
+
+float rangeCapMultiplier = input.float(
+    4.236,
+    "Écrêtage d'amplitude",
+    minval = 1.05,
+    maxval = 20.0,
+    step = 0.001,
+    tooltip = "Actif uniquement avec « Ratio des moyennes ». Limite le poids d'une variation aberrante sans modifier sa proportion B/S.\n\nIl plafonne l'amplitude d'un tick à ce multiple d'une RÉFÉRENCE, qui avance avec un coefficient 1/longueur SUR LA SÉRIE 1T.\n\nLire « Diag 14 — référence d'amplitude » (script « BSP Diag ») pour voir sa valeur courante en pas de cotation.",
+    group = G_ENGINE,
+    active = rangeWeightedMode)
+
+bool hideUntilWarm = input.bool(
+    true,
+    "Masquer pendant le préchauffage",
+    tooltip = "Préchauffage : 2 × longueur ticks pour HMA/WMA/SMA, 3 × pour EMA/RMA. Les ticks au même prix comptent aussi. Le signal reste gris avant la fin, même si ce réglage est décoché (une estimation, option « Estimer », aussi : v11.66).",
+    group = G_ENGINE)
+
+// ============================================================================
+// RÉGLAGES — ÉTAT ET RENDU
+// ============================================================================
+
+float neutralEnterSpread = input.float(
+    2.618,
+    "Retour au gris — écart (%)",
+    minval = 0.0,
+    maxval = 50.0,
+    step = 0.001,
+    tooltip = "Une pression active revient au gris lorsque l'écart BP-SP atteint cette zone.",
+    group = G_RENDER)
+
+float neutralExitSpread = input.float(
+    4.236,
+    "Sortie du gris — écart (%)",
+    minval = 0.0,
+    maxval = 50.0,
+    step = 0.001,
+    tooltip = "Depuis le gris, l'écart BP-SP doit dépasser ce seuil pour activer le vert ou le rouge.\n\nC'EST LUI QUI COMMANDE LA QUANTITÉ DE GRIS, pas la vitesse du moteur. Lire « Diag 05 — écart BP-SP » (script « BSP Diag ») sur quelques dizaines de barres.",
+    group = G_RENDER)
+
+int showLastInput = input.int(
+    1000,
+    "Barres 10T dessinées",
+    minval = 100,
+    maxval = 5000,
+    group = G_RENDER)
+
+// 9e réglage : même position que « Garder la couleur » de la v11.63 (la
+// v11.64 l'avait détourné pour couper la courbe ; rétabli en [DT]).
+bool keepBridgeColor = input.bool(
+    true,
+    "Garder la couleur sur une reprise",
+    tooltip = "Bougie sans aucun tick 1T livré : la valeur est TOUJOURS reprise, la courbe ne se coupe jamais ([BQ]) — c'est la couleur qui porte l'information.\n\nCOCHÉ (défaut) — une reprise garde l'état de la dernière mesure pendant dix bougies sans tick du moteur, puis passe au gris. Une reprise rafraîchie (tick plus frais trouvé ailleurs) remet la fenêtre à zéro.\n\nDÉCOCHÉ — toute reprise simple ou rafraîchie est grise tout de suite ; une ESTIMATION (option « Estimer les bougies sans tick ») garde sa propre couleur dans sa fenêtre, cette case ne la concerne pas.\n\nAucun prix manquant n'est reconstruit. Diag 21 et 22 (script « BSP Diag ») signalent les ponts. Pour couper la courbe au lieu de la reprendre : « Reprises strictes », en fin de la section « 2 — Rendu 10T ».",
+    group = G_RENDER)
+
+
+bool showFill = input.bool(
+    true,
+    "Afficher le remplissage",
+    inline = "fill",
+    group = G_RENDER)
+
+bool gradientOpacity = input.bool(
+    true,
+    "Opacité progressive",
+    inline = "fill",
+    group = G_RENDER)
+
+color buyerColor = input.color(#00B96B, "Acheteurs", group = G_COLORS)
+color sellerColor = input.color(#F23645, "Vendeurs", group = G_COLORS)
+color neutralColor = input.color(#8A8A9A, "Neutre", group = G_COLORS)
+
+bool colorBothLines = input.bool(
+    false,
+    "Colorer les deux courbes ensemble",
+    tooltip = "DÉCOCHÉ (défaut) — seule la courbe du camp actif est colorée ; l'autre reste grise.\n\nCOCHÉ — les deux courbes portent la couleur de l'état.",
+    group = G_COLORS)
+
+int strongTransparency = input.int(70, "Transparence — pression forte", minval = 0, maxval = 100, group = G_COLORS)
+int weakTransparency = input.int(92, "Transparence — pression faible", minval = 0, maxval = 100, group = G_COLORS)
+int neutralTransparency = input.int(82, "Transparence — neutre", minval = 0, maxval = 100, group = G_COLORS)
+
+int activeFillCap = input.int(
+    78,
+    "Couleurs actives — transparence maximale",
+    minval = 0,
+    maxval = 100,
+    tooltip = "Plafond de transparence du REMPLISSAGE vert ou rouge, pour qu'une pression faible se lise comme une couleur et non comme du noir sur fond sombre. « Transparence — pression forte / faible » agissent en dessous de ce plafond, et l'opacité progressive garde son rôle.\n\n100 = aucun plafond, rendu d'origine. Les courbes ne sont pas concernées.",
+    group = G_COLORS)
+
+int neutralFillCap = input.int(
+    60,
+    "Gris neutre — transparence maximale",
+    minval = 0,
+    maxval = 100,
+    tooltip = "Plafond de transparence du REMPLISSAGE neutre, pour qu'il se lise comme du gris et non comme du noir sur fond sombre. « Transparence — neutre » agit en dessous de ce plafond.\n\n100 = aucun plafond, rendu d'origine. Les courbes ne sont pas concernées.",
+    group = G_COLORS)
+
+// [DU] Hors DIAG-SECTION, un seul interrupteur de CODE distingue les deux
+// fichiers : false ici, true dans « BSP Diag » (diffèrent aussi le titre, le
+// nom court, le défaut et l'info-bulle de « Afficher les diagnostics » : voir
+// l'en-tête). Ce que le principal ne trace pas (les
+// dix-neuf compteurs, le balayage du Diag 63, la qualité, les mémoires du
+// bord des Diag 64/10/47, firstTickOffsetMs) n'y est plus calculé.
+const bool DIAG_FULL = false
+
+// [DT] Décoché par défaut dans le script principal, qui ne garde que sept
+// diagnostics (11, 12, 30, 33, 55, 58, 61) ; les 59 sont dans le script
+// « BSP Diag », au moteur identique, à charger pour auditer.
+bool showDiagnostics = input.bool(
+    false,
+    "Afficher les diagnostics",
+    tooltip = "Ajoute les contrôles techniques dans la fenêtre de données uniquement. Ils décrivent la bougie survolée (décalés d'une bougie comme les courbes), sauf le Diag 55, qui décrit le bord de la bougie en cours (non décalé). Les Diag cités dans les info-bulles et absents d'ici sont dans le script « BSP Diag ».\n\nSCRIPT PRINCIPAL (v11.65) : sept diagnostics seulement — 11 tick lu, 12 cadence, 30 bougies sans valeur, 33 partielles, 55 bord vivant, 58 source du tick affiché, 61 âge de la valeur. Les 59 diagnostics sont dans le script « BSP Diag v11.65 », même moteur, à charger seulement pour auditer : chaque tracé est une série poussée au graphique à chaque tick.\n\nÀ LIRE EN PRIORITÉ :\n  Diag 03 — doit valoir 1 (vide si aucune lecture n'a été possible).\n  Diag 11 — tick lu (0/1).\n  Diag 12 — cadence moyenne sur les bougies closes au compte lisible (Diag 32) : 10,00 attendu. Retenue dès qu'aucune ambiguïté n'est détectée par les critères de cadence ; un excédent après la clôture n'exclut plus (v11.33). Pas une preuve d'appartenance. Au-dessus, le flux 1T livre plus d'éléments que le compteur de ticks du graphique n'annonce de transactions — écart non expliqué, voir Diag 48.\n  Diag 17, 18 et 26 — bougies écartées, par motif.\n  Diag 22 / 30 — bougies pontées / trous de données.\n  Diag 27 — bougies à rattachement anormal : un tick hors des bornes, le dernier daté sur la bougie suivante, ou un numéro déjà compté pour la précédente (v11.34). Un bloc simplement plus fourni que dix n'y est plus compté : il est au Diag 48, et il vaut la qualité 2.\n  Diag 33 — bougies partielles (moins de dix ticks comptés, compte lisible).\n  Diag 34 — qualité (3 cohérente).\n  Diag 35 — bougies dont le prix du tick TRACÉ (après récupération, v11.47) diffère de la clôture 10T : le tick tracé ne correspond pas à la clôture ; une égalité de prix ne prouve pas que le dernier tick a été livré.\n  Diag 39 — bougies dont le dernier tick est daté à l'ouverture de la suivante ou au-delà.\n  Diag 44 — barres manquantes constatées à cette lecture (elles peuvent appartenir à la bougie précédente).\n  Diag 46 — heure de clôture de la bougie courante connue.\n  Diag 49 — tableaux 1T non triés (doit rester à 0).\n  Diag 48 — blocs de plus de dix éléments : écart de compte entre le flux 1T et le compteur de ticks du graphique. Observé, non expliqué — ni preuve de complétude, ni accusation.\n  Diag 62 — fins récupérées : un tick plus récent de la bougie, livré dans le tableau de la suivante (Diag 58 = 1), transporté par sa traîne (−5, v11.46), venu de la réserve (k ≥ 2, −7) ou attribué par numéro (−6, option), remplace celui de son tableau (v11.28).\n  Diag 63 — ticks plus récents d'un tableau voisin ou de sa traîne (v11.46) écartés parce que datés d'une milliseconde de frontière : appartenance indécidable, jamais lus pour cette bougie (v11.28, voisins seulement depuis la v11.30). C'est le premier résidu de fidélité : sur une journée, autant de bougies au Diag 63 qu'au Diag 35.\n\nCOUVERTURE :\n  Diag 41 — barres 1T CONSTATÉES manquantes entre deux numéros observés (cumul) : trous à l'intérieur d'un bloc, et écarts d'un bloc au suivant. Une valeur > 0 établit que le contexte 1T a produit ces barres et que les blocs retenus au comptage ne les contenaient pas.\n  Diag 43 — la part du Diag 41 constatée entre deux blocs plutôt qu'à l'intérieur d'un bloc. ELLE EST INCLUSE DANS LE DIAG 41 : ne jamais additionner 41 et 43. Sa localisation n'est pas prouvée — un écart entre le bloc A et le bloc B peut venir de la fin de A comme du début de B.\n  Diag 42 — déficit des blocs par rapport à dix (cumul), bougies vides comprises. Écrêté à zéro : un bloc de plus de dix éléments compte 0, pas un négatif.\n  Diag 45 — Diag 42 moins Diag 41. RÉSIDU SIGNÉ ET NON ATTRIBUABLE : il mélange le déficit réel du contexte 1T, frontières de séance comprises, et ce que les deux extrémités de la fenêtre ne peuvent pas montrer — la tête du premier bloc et la queue du dernier. Seuls les éléments DANS LES BORNES comptent (v11.18) ; un bloc sans élément dans les bornes vaut un bloc vide. Identité exacte, à numéros uniques et croissants : Diag 45 = 10 × bougies comptées − étendue des numéros observés + somme des excédents au-delà de dix par bloc, ce dernier terme venant de l'écrêtage à zéro du Diag 42. Le Diag 45, lui, n'est pas écrêté : un résidu négatif dit de lui-même que la comparaison n'est pas refermée.\n  Le Diag 45 oscille de ±1 ou 2 en direct : le déficit d'une bougie est compté à sa lecture, l'écart de numéros qui l'explique à la lecture du bloc SUIVANT (Diag 44) ; il revient à 0 une bougie plus tard. Un résidu qui grandit avec le nombre de bougies signale un déficit à chercher — frontières de séance d'abord (Diag 18, 24). (La borne des deux extrémités, Diag 47 jusqu'à la v11.47, n'est plus tracée : au plus un bloc de chaque côté, dix numéros chacun.)\n  Diag 47 — depuis la v11.49 : exécutions confirmées à heure de clôture connue (voir son libellé).\n\nCE QUE CES COMPTEURS NE DISENT PAS. Ils décrivent ce que le contexte 1T a produit et ce que les blocs retenus au comptage en contenaient, dans CETTE exécution. Le script ne conserve pas le journal de toutes les livraisons intrabarres. Ils ne prouvent pas que le contexte 1T a reçu toutes les transactions du marché, donc ni l'exactitude des moyennes du moteur, ni l'absence de dérive. Un Diag 45 nul n'est pas un certificat, c'est l'absence d'un symptôme, et un Diag 45 positif n'accuse personne.",
+    group = G_DIAG)
+
+// Réglages ajoutés après coup : toujours en fin de liste, pour ne déplacer
+// aucun réglage enregistré.
+color axisMinorColor = input.color(
+    color.new(#000000, 50),
+    "Chiffre de l'axe — camp opposé",
+    tooltip = "Uniquement le chiffre sur l'échelle du camp opposé : vendeur lorsque l'acheteur est actif, acheteur lorsque le vendeur est actif. Défaut : noir à 50 % de transparence. En état neutre, les deux chiffres gardent la couleur Neutre. Les courbes et leur remplissage ne sont pas concernés. Utilisé lorsque « Colorer les deux courbes ensemble » est décoché.",
+    group = G_AXIS)
+
+// [DD] Option, décochée par défaut ; [DT] : rétablie fonctionnelle (la v11.64
+// arrêtait le script si elle était cochée) et calculée seulement si cochée.
+bool estimateGaps = input.bool(
+    false,
+    "Estimer les bougies sans tick",
+    tooltip = "OPTION v11.45, décochée par défaut — un vrai BSP 1T n'estime pas. Cochée : une bougie sans tick prouvé ni candidat de reprise trace une ESTIMATION avancée avec son propre OHLC 10T (mouvement net réparti sur dix ticks, référence d'amplitude en guise de dénominateur), jamais une mesure : Diag 58 = -4, Diag 55 = 8, comptée pontée (Diag 21, 22 du script « BSP Diag »). Elle garde sa couleur dans la fenêtre de dix bougies ou pendant « Estimation : garder la couleur (secondes) », puis gris. Le moteur 1T n'est pas touché et reprend au premier tick réel.\n\nDécochée, rien n'est calculé.",
+    group = G_RENDER)
+
+// [DF] Option d'essai, décochée par défaut ; [DT] : rétablie fonctionnelle.
+bool boundaryByCount = input.bool(
+    false,
+    "Frontière partagée : attribution par numéro",
+    tooltip = "ESSAI v11.47, décoché par défaut. À une frontière partagée (clôture de N et ouverture de N+1 dans la même milliseconde), un seul candidat est considéré : le prédécesseur transporté par le premier élément du tableau de N+1, sous un plafond de compte (premier numéro propre + 9). Risque documenté dans les LIMITES : premier tick de N+1 non livré alors que le deuxième l'est. Diag 58 = -6, qualité 2, Diag 27 (script « BSP Diag »).\n\nDécoché, rien ne change.",
+    group = G_RENDER)
+
+// [DL] Nombre de ticks 1T sur lesquels le moteur est calculé : calc_bars_count
+// de la requête 1T. Réglage ajouté en fin de liste (le 25e).
+int tickHistoryInput = input.int(
+    60000,
+    "Historique 1T demandé (ticks)",
+    minval = 2000,
+    maxval = 200000,
+    step = 1000,
+    tooltip = "RÉGLAGE v11.53 — le moteur 1T est calculé sur CHAQUE tick de cet historique, au chargement : ce qui précède la première bougie calculée du graphique ne sert qu'à préchauffer ses moyennes. Trop long, il allonge le chargement pour rien ; trop court, les bougies les plus anciennes n'ont plus de ticks 1T (Diag 18 > 0 à gauche du graphique dans le script « BSP Diag », courbe absente).\n\nRÈGLE : 10 × « Barres calculées » (onglet Entrées, section Calcul) + 43 × « Longueur » (10 000 pour 233). Exemple : 1 800 barres et longueur 233 → 28 000, arrondi à 30 000. Défaut 60 000 : les 5 000 barres déclarées par le script + 10 000. Jusqu'à la v11.52 : 100 000 fixes.\n\nPOURQUOI CETTE MARGE : au modèle du moteur (RMA 233, « Ratio des moyennes »), 10 000 ticks avant la première bougie calculée donnent les mêmes valeurs qu'un historique de 100 000 ticks — écart de BP au plus 3e-9 %, même état partout ; 5 000 laissent jusqu'à 5e-4 %.\n\nCONTRÔLE : au profileur, le nombre d'exécutions de l'appel du moteur (dans bspEngine1TWithTrail) est le nombre de ticks 1T calculés. Le direct n'est pas concerné : le moteur n'y calcule que les nouveaux ticks.",
+    group = G_ENGINE)
+
+// [DO] Estimation : durée pendant laquelle la couleur est gardée sans tick du
+// moteur, en plus des dix bougies. Réglage ajouté en fin de liste (le 26e).
+float estimateHoldSeconds = input.float(
+    3.0,
+    "Estimation : garder la couleur (secondes)",
+    minval = 0.0,
+    maxval = 30.0,
+    step = 0.5,
+    tooltip = "RÉGLAGE v11.56 — ne concerne que l'option « Estimer les bougies sans tick ». Une estimation garde sa couleur pendant dix bougies sans tick du moteur, puis passe au gris. En rafale (≈ 100 bougies par seconde aux publications de clôture de New York, 21:50 et 21:55 Paris), dix bougies font 0,1 seconde : l'estimation était grise pendant presque toute la rafale. Ici, elle garde aussi sa couleur tant que le dernier vrai tick du moteur a moins de ce nombre de secondes (série : à la clôture de la bougie ; bord vivant : à l'ouverture de la bougie en cours). En régime calme, dix bougies durent plus longtemps que ce réglage : rien ne change. 0 = dix bougies seulement (v11.53 à l'identique). Les reprises simples et rafraîchies ne sont pas concernées.",
+    group = G_RENDER)
+int estimateHoldMs = int(math.round(estimateHoldSeconds * 1000.0))
+
+// [DT] Deux comportements de la v11.64, en OPTIONS décochées — réglages
+// ajoutés en fin de liste (27e et 28e), aucun réglage enregistré ne bouge.
+bool edgeCapPrudent = input.bool(
+    false,
+    "Bord vivant : plafond prudent (réserve)",
+    tooltip = "DÉCOCHÉ (défaut, v11.63) — le bord lit son tableau propre jusqu'à « premier numéro reçu + 9 » ([DC]). Si le premier tick de la bougie manque, le bord peut montrer un tick de la suivante, que la lecture différée écarte : bord en avance d'un tick sur ≈ 1 % des bougies (Diag 64 du script « BSP Diag » : 238 sur 26 171 le 25/09, mesuré).\n\nCOCHÉ (v11.64) — le plafond est combiné par minimum avec « dernier numéro connu dans la réserve avant l'ouverture + 10 ». Écarte l’avance due au premier tick propre manquant, sous l’hypothèse de dix numéros 1T par bougie 10T ; aucune garantie générale d’appartenance. Peut être EN RETARD d'autant de ticks que la fin de la bougie précédente a été perdue à la livraison (46 % de bougies partielles le 25/09) ou datée de la milliseconde partagée avec l'ouverture (22 % des frontières) ; sans base dans la réserve, aucune mesure courante bornée par numéro (Diag 55 = -2) ; une reprise peut toutefois être dessinée. Retard non mesuré ; la v11.57 avait refusé ce compromis.",
+    group = G_RENDER)
+
+bool strictBridges = input.bool(
+    false,
+    "Reprises strictes : grises, coupées après dix bougies",
+    tooltip = "DÉCOCHÉ (défaut, v11.63) — la courbe ne se coupe jamais ([BQ]) : une bougie sans tick reprend la dernière valeur, colorée dans la fenêtre si « Garder la couleur », grise ensuite.\n\nCOCHÉ (v11.64) — toute reprise est grise tout de suite et la courbe est COUPÉE après dix bougies consécutives sans tick du moteur. En rafale (clôture de New York), TradingView ne livre parfois aucun tick 1T pendant 27 à 164 bougies 10T d'affilée : la courbe y montre alors des trous de 0,3 à 1,6 s. Au bord vivant, même règle.",
+    group = G_RENDER)
+
+// TESTS 22h (version perf, temporaire) : quatre interrupteurs, tous cochés par
+// défaut — rendu identique à la v11.66. En décocher UN SEUL, AVANT la rafale
+// (changer un réglage recharge tout l'historique : jamais pendant), et noter
+// si le lag change (audit/BSP_v11.66_lag_22h.md).
+bool perfEdgeCompute = input.bool(
+    true,
+    "Test : calculer le bord vivant",
+    tooltip = "TEST 22h. Décoché : le bord vivant n'est ni calculé (ses dichotomies sur la réserve et le tableau vivant, à chaque tick, côté serveur) ni dessiné. Les chiffres de l'échelle suivent la dernière bougie close. Si le lag disparaît ici mais pas avec « dessiner » seul décoché, c'est le CALCUL du bord (serveur) ; s'il disparaît aussi avec « dessiner » seul, c'est le DESSIN (navigateur).",
+    group = G_PERF)
+
+bool perfEdgeDraw = input.bool(
+    true,
+    "Test : dessiner le bord vivant",
+    tooltip = "TEST 22h. Décoché : le bord vivant est encore calculé (l'échelle le suit toujours) mais plus dessiné : aucune mise à jour de ligne, d'étiquette ou de remplissage à chaque tick. Si le lag disparaît, ce sont les objets de dessin du bord qui pèsent dans le navigateur.",
+    group = G_PERF)
+
+bool perfAxisPlots = input.bool(
+    true,
+    "Test : chiffres sur l'échelle",
+    tooltip = "TEST 22h. Décoché : les deux tracés qui ne servent qu'aux chiffres de l'échelle de prix passent en display.none (deux séries de moins poussées au graphique à chaque tick).",
+    group = G_PERF)
+
+bool perfCurvePlots = input.bool(
+    true,
+    "Test : courbes et remplissage",
+    tooltip = "TEST 22h. Décoché : les deux courbes et le remplissage passent en display.none. Le script continue de tourner sur le serveur TradingView, mais le navigateur n'a plus rien à dessiner pour lui. Si le lag disparaît, c'est le dessin (navigateur) ; s'il reste, c'est le calcul (serveur) ou autre chose que le BSP.",
+    group = G_PERF)
+
+// ============================================================================
+// GARDE-FOUS DU GRAPHIQUE ([DT] : de la v11.64, sans l'arrêt sur les options)
+// ============================================================================
+
+if barstate.isfirst
+    if na(syminfo.mintick) or syminfo.mintick <= 0.0
+        runtime.error("BSP : pas de cotation invalide.")
+    if not timeframe.isticks or timeframe.multiplier != EXPECTED_TICKS
+        runtime.error("BSP v11.66 exige un graphique 10T (10 ticks, pas 10 minutes).")
+    if not chart.is_standard
+        runtime.error("BSP v11.66 exige des bougies à prix OHLC standard.")
+
+// ============================================================================
+// FONCTIONS PURES
+// ============================================================================
+
+clamp(float value, float minimum, float maximum) =>
+    math.min(math.max(value, minimum), maximum)
+
+// Avertissement attendu du compilateur sur les cinq ta.* ci-dessous (« should
+// be called on each calculation for consistency ») : kind est « simple », la
+// même branche est prise à chaque tick 1T, les séries restent cohérentes. Les
+// calculer toutes à chaque tick pour le faire taire coûterait sept moyennes
+// (HMA = trois WMA) au lieu d'une ([DU]).
+movingAverage(float source, simple int length, simple string kind) =>
+    switch kind
+        "HMA" => ta.hma(source, length)
+        "WMA" => ta.wma(source, length)
+        "EMA" => ta.ema(source, length)
+        "SMA" => ta.sma(source, length)
+        "RMA" => ta.rma(source, length)
+
+nextSignalState(
+    int previousState,
+    float currentSpread,
+    float enterThreshold,
+    float exitThreshold) =>
+    int result = 0
+    if na(currentSpread)
+        result := 0
+    else if previousState == 1
+        result := currentSpread < -exitThreshold ? -1 : currentSpread <= enterThreshold ? 0 : 1
+    else if previousState == -1
+        result := currentSpread > exitThreshold ? 1 : currentSpread >= -enterThreshold ? 0 : -1
+    else
+        result := currentSpread > exitThreshold ? 1 : currentSpread < -exitThreshold ? -1 : 0
+    result
+
+// BALAYAGES BORNÉS ([DH]) : un tableau 1T n'est jamais regardé au-delà de ses
+// SCAN_MAX premiers éléments — les seuls que la lecture puisse utiliser (les
+// ticks propres et les premiers de la queue) et les seuls que la réserve
+// verse (POOL_BLOCK_MAX, même valeur). Un tableau démesuré (dizaines de
+// milliers d'éléments, 24/09) coûtait deux parcours complets par exécution
+// (isSorted) : le tri n'est vérifié, et les dichotomies ne cherchent, que
+// dans ce préfixe. Les tailles réelles (count0, count1, Diag 15/24) restent
+// celles des tableaux.
+const int SCAN_MAX = 2000
+
+// Dichotomies sur des tableaux triés par heure (le tri est vérifié à part),
+// dans le préfixe de SCAN_MAX éléments ; « aucun » = taille du préfixe.
+firstIndexAtOrAfter(array<int> times, int target) =>
+    int total = array.size(times)
+    int size = math.min(total, SCAN_MAX)
+    int found = size
+    if size > 0 and not na(target)
+        if array.get(times, 0) >= target
+            found := 0
+        else if array.get(times, size - 1) >= target
+            if total <= SCAN_MAX
+                // La recherche native renvoie le premier égal, sinon le voisin
+                // inférieur. Les bornes extérieures sont déjà traitées.
+                int nativeRank = array.binary_search_leftmost(times, target)
+                found := array.get(times, nativeRank) < target ? nativeRank + 1 : nativeRank
+            else
+                // Tableau surdimensionné : seul le préfixe validé est cherché.
+                int lowRank = 1
+                int highRank = size - 1
+                while lowRank <= highRank
+                    int middle = int(math.floor((lowRank + highRank) / 2))
+                    if array.get(times, middle) >= target
+                        found := middle
+                        highRank := middle - 1
+                    else
+                        lowRank := middle + 1
+    found
+
+// Rang du dernier élément qui ne dépasse pas la cible, ou -1 si aucun
+// (préfixe de SCAN_MAX éléments).
+lastIndexAtOrBefore(array<int> times, int target) =>
+    int total = array.size(times)
+    int size = math.min(total, SCAN_MAX)
+    int found = -1
+    if size > 0 and not na(target)
+        if array.get(times, size - 1) <= target
+            found := size - 1
+        else if array.get(times, 0) <= target
+            if total <= SCAN_MAX
+                // La recherche native renvoie le dernier égal, sinon le voisin
+                // supérieur ; la correction donne le dernier <= cible.
+                int nativeRank = array.binary_search_rightmost(times, target)
+                found := array.get(times, nativeRank) > target ? nativeRank - 1 : nativeRank
+            else
+                int lowRank = 0
+                int highRank = size - 2
+                while lowRank <= highRank
+                    int middle = int(math.floor((lowRank + highRank) / 2))
+                    if array.get(times, middle) <= target
+                        found := middle
+                        lowRank := middle + 1
+                    else
+                        highRank := middle - 1
+    found
+
+// Un tableau 1T est-il trié par heure ? Vérifié au plus une fois par exécution
+// sur son préfixe de SCAN_MAX éléments ([DH]) — le tableau figé, une fois par
+// bougie ([DU]) ; les lectures reçoivent le résultat.
+isSorted(array<int> times, array<int> serials) =>
+    int size = math.min(array.size(times), SCAN_MAX)
+    bool sorted = array.size(times) == array.size(serials)
+    if sorted and size > 0
+        int previousTime = array.get(times, 0)
+        int previousSerial = array.get(serials, 0)
+        sorted := not na(previousTime) and not na(previousSerial)
+        if sorted and size > 1
+            for rank = 1 to size - 1
+                int currentTime = array.get(times, rank)
+                int currentSerial = array.get(serials, rank)
+                if na(currentTime) or na(currentSerial) or currentTime < previousTime or currentSerial <= previousSerial
+                    sorted := false
+                    break
+                previousTime := currentTime
+                previousSerial := currentSerial
+    sorted
+
+
+// Dernier élément d'un tableau daté dans [lower, upper], avec son numéro 1T ;
+// rien si le tableau est vide, non trié, ou sans élément dans les bornes.
+lastInWindow(array<int> times, array<int> serials, bool sorted, int lower, int upper) =>
+    int index = sorted and array.size(times) > 0 ? lastIndexAtOrBefore(times, upper) : -1
+    int foundTime = index >= 0 ? array.get(times, index) : na
+    bool found = index >= 0 and foundTime >= lower
+    int foundSerial = found ? array.get(serials, index) : na
+    [found, index, foundTime, foundSerial]
+
+// « Plus récent que la valeur tracée » : l'heure décide ; à heure égale, le
+// numéro 1T quand les deux sont connus (même contexte) ; sinon, pas plus
+// récent. La courbe ne recule jamais dans le temps du moteur.
+newerThanShown(int stamp, int serial, int shownTime, int shownSerial) =>
+    na(shownTime) ? true : stamp > shownTime ? true : stamp < shownTime ? false : (not na(shownSerial) and not na(serial) and serial > shownSerial)
+
+// Valeur affichable d'un tick : BP brut écrêté à [0, 100], na si le ratio est
+// indéfini ou si le préchauffage n'est pas terminé (case cochée). Une seule
+// règle pour la série et le bord ([CZ]).
+definedValue(float raw, float warm, bool hide) =>
+    bool warmOk = not na(warm) and warm >= 100.0
+    na(raw) or (hide and not warmOk) ? na : clamp(raw, 0.0, 100.0)
+
+// ── ESTIMATION D'UNE BOUGIE SANS TICK ([DD], option) ──
+// La bougie 10T elle-même, prise comme un mouvement net réparti sur ses dix
+// ticks, fait avancer une COPIE du ratio : ρ = part acheteuse du mouvement
+// net (B/(B+S) sur l'OHLC 10T contre le dernier prix connu du moteur, la
+// formule du moteur) ; r = amplitude par tick = étendue/10 en pas de
+// cotation, écrêtée comme dans le moteur (cap × référence) ; w = poids de
+// dix pas de la moyenne récursive (1 − (1 − 1/longueur)^10), pondéré par
+// r/référence en « Ratio des moyennes » (la moyenne pondère chaque tick par
+// son amplitude), plafonné à 1. BP' = BP + (ρ − BP) · poids ; la référence
+// avance de w vers r. Sans mouvement (moins d'un demi-pas) : ρ = BP, la
+// référence est gelée, comme rangeReference dans le moteur ([DR]). Une
+// approximation, jamais une mesure ; le vrai moteur
+// n'est pas touché et reprend au premier tick réel.
+estimateStep(float bp, float previousPrice, float reference, float barHigh, float barLow, float barClose, simple int length, simple string kind, float capMultiplier, bool weightedMode) =>
+    float tick = syminfo.mintick
+    float buyerRaw = barClose - math.min(barLow, previousPrice)
+    float sellerRaw = math.max(barHigh, previousPrice) - barClose
+    float trueRange = buyerRaw + sellerRaw
+    bool validRange = trueRange / tick >= MIN_MOVE_TICKS
+    // [DP] Dix pas de la moyenne choisie : EMA 2/(longueur + 1), RMA
+    // 1/longueur ; SMA, WMA et HMA n'ont pas de pas récursif, la RMA leur
+    // sert de substitut (approximation, comme l'estimation elle-même).
+    float alpha = kind == "EMA" ? 2.0 / (length + 1) : 1.0 / length
+    float w = 1.0 - math.pow(1.0 - alpha, EXPECTED_TICKS)
+    // [DQ] La référence d'amplitude avance de 1/longueur par tick dans le
+    // moteur, quel que soit le type de moyenne : dix pas de ce coefficient-là.
+    float wReference = 1.0 - math.pow(1.0 - 1.0 / length, EXPECTED_TICKS)
+    float rho = validRange ? buyerRaw / trueRange * 100.0 : bp
+    float perTick = validRange ? trueRange / EXPECTED_TICKS / tick : 0.0
+    bool referenceOk = not na(reference) and reference > MIN_RANGE_TICKS
+    // [DR] Écrêtage dès que la référence est connue, dans les deux modes,
+    // comme le moteur (en « Moyenne du ratio » la référence ne nourrit
+    // aucun tracé : sans effet à l'écran).
+    float capped = referenceOk ? math.min(perTick, capMultiplier * math.max(reference, 1.0)) : perTick
+    float weight = weightedMode and referenceOk ? math.min(1.0, w * capped / reference) : w
+    float bpNext = bp + (rho - bp) * weight
+    float referenceNext = validRange and not na(reference) ? reference + (capped - reference) * wReference : reference
+    [bpNext, referenceNext]
+
+// ── RÉSERVE DES TICKS LIVRÉS ([CU]) ──
+// Chaque bougie close y a versé son tableau vivant UNE fois, à son exécution
+// confirmée, en fin de script ([DG]) : chaque élément est conservé une fois,
+// par numéro, dans une réserve triée par numéro et par heure ; un élément
+// dont l'heure contredirait l'ordre des numéros est refusé. Un tick livré
+// dans un tableau quelconque, aussi loin soit-il, reste retrouvable par son
+// heure — dans la limite de POOL_BLOCK_MAX éléments lus par tableau et de
+// POOL_MAX conservés ([CW]). Sans varip : la réserve n'est modifiée qu'à une
+// exécution confirmée, jamais défaite par un retour en arrière (rollback).
+type Tick
+    int serial
+    int stamp
+    float raw
+    int state
+    float warm
+    int context
+    float price
+    float reference
+    int source
+    // 0 : élément livré ; 1 : prédécesseur transporté par un élément (traîne,
+    // [DF]) — même valeur du moteur, même heure, même numéro que s'il avait
+    // été livré, mais versé depuis un autre élément.
+    int trail
+
+const int POOL_MAX = 6000
+// Éléments versés au plus par tableau ([CW]) : ses propres ticks et les
+// premiers de sa queue ; le reste d'un tableau démesuré n'est pas lu (même
+// valeur que SCAN_MAX : ce qui n'est pas balayé n'est pas versé).
+const int POOL_BLOCK_MAX = 2000
+// Purge ([DG]) : une seule recopie des POOL_MAX derniers éléments quand
+// l'excédent dépasse cette marge — jamais de décalages un à un (chaque
+// décalage déplaçait toute la réserve, dix fois par exécution une fois pleine).
+// Marge portée de 600 à 3 000 en [DI] : la recopie (une boucle de POOL_MAX
+// itérations, plus de la moitié du versement au modèle — 34 % du temps à
+// l'historique au profileur de la v11.48) se fait cinq fois moins souvent ;
+// la réserve compte 6 000 à 9 000 éléments entre deux purges (limite Pine :
+// 100 000) ; aucune lecture ne change (les éléments en plus sont les plus
+// anciens, hors de toute fenêtre ; 0 choix différent sur 40 000 lectures au
+// modèle joint).
+const int POOL_PURGE_SLACK = 3000
+
+// Premier rang dont le numéro est ≥ target ; la taille si aucun.
+poolRankBySerial(array<Tick> pool, int target) =>
+    int size = array.size(pool)
+    int found = size
+    if size > 0 and not na(target)
+        int firstSerial = array.get(pool, 0).serial
+        int lastSerial = array.get(pool, size - 1).serial
+        if target <= firstSerial
+            found := 0
+        else if target <= lastSerial
+            // Un numéro égal au rang deviné prouve sa position, même avec
+            // des trous ailleurs ; sinon, dichotomie inchangée.
+            int guess = size - 1 - (lastSerial - target)
+            if guess >= 0 and guess < size and array.get(pool, guess).serial == target
+                found := guess
+            else
+                int lowRank = 1
+                int highRank = size - 1
+                while lowRank <= highRank
+                    int middle = int(math.floor((lowRank + highRank) / 2))
+                    if array.get(pool, middle).serial >= target
+                        found := middle
+                        highRank := middle - 1
+                    else
+                        lowRank := middle + 1
+    found
+
+// Dernier rang daté ≤ target ; −1 si aucun.
+poolLastAtOrBefore(array<Tick> pool, int target) =>
+    int size = array.size(pool)
+    int found = -1
+    if size > 0 and not na(target)
+        if array.get(pool, size - 1).stamp <= target
+            found := size - 1
+        else if array.get(pool, 0).stamp <= target
+            int lowRank = 0
+            int highRank = size - 2
+            while lowRank <= highRank
+                int middle = int(math.floor((lowRank + highRank) / 2))
+                if array.get(pool, middle).stamp <= target
+                    found := middle
+                    lowRank := middle + 1
+                else
+                    highRank := middle - 1
+    found
+
+// Un élément dans la réserve ([CW] ; factorisé en [DF] pour la traîne) :
+// ajout direct en fin quand le numéro et l'heure dépassent son dernier
+// élément, dichotomie sinon ; numéro déjà présent ignoré ; heure qui
+// casserait l'ordre refusée. Un numéro na (prédécesseur du premier tick du
+// contexte) n'est pas versé.
+poolInsert(array<Tick> pool, int s, int t, float raw, int state, float warm, int context, float price, float reference, int sourceBar, int trailFlag, int deliveredFrom) =>
+    bool inserted = false
+    int nextDeliveredFrom = deliveredFrom
+    if not na(s) and not na(t)
+        int size = array.size(pool)
+        if size == 0
+            array.push(pool, Tick.new(s, t, raw, state, warm, context, price, reference, sourceBar, trailFlag))
+            inserted := true
+            nextDeliveredFrom := trailFlag == 0 ? s : int(na)
+        else
+            Tick lastTick = array.get(pool, size - 1)
+            if s > lastTick.serial
+                if t >= lastTick.stamp
+                    array.push(pool, Tick.new(s, t, raw, state, warm, context, price, reference, sourceBar, trailFlag))
+                    inserted := true
+                    // Certifier seulement une queue contigue d'elements LIVRES.
+                    // Un predecesseur ajoute en fin interrompt cette preuve.
+                    nextDeliveredFrom := trailFlag == 0 ? (not na(deliveredFrom) and s == lastTick.serial + 1 ? deliveredFrom : s) : int(na)
+            else if s < lastTick.serial
+                int pos = poolRankBySerial(pool, s)
+                int serialAtPos = pos < size ? array.get(pool, pos).serial : na
+                bool present = pos < size and serialAtPos == s
+                if not present
+                    int stampBefore = pos > 0 ? array.get(pool, pos - 1).stamp : na
+                    int stampAtPos = pos < size ? array.get(pool, pos).stamp : na
+                    bool orderOk = (pos == 0 or stampBefore <= t) and (pos >= size or stampAtPos >= t)
+                    if orderOk
+                        if pos >= size
+                            array.push(pool, Tick.new(s, t, raw, state, warm, context, price, reference, sourceBar, trailFlag))
+                        else
+                            array.insert(pool, pos, Tick.new(s, t, raw, state, warm, context, price, reference, sourceBar, trailFlag))
+                        inserted := true
+            // Insertion interieure, doublon ou refus : la queue certifiee
+            // reste valide. Ne jamais promouvoir un doublon trail=1 en livre.
+    [inserted, nextDeliveredFrom]
+
+// Versement du tableau vivant d'une bougie à son exécution confirmée ([DG]),
+// éléments ET prédécesseurs transportés ([DF]) : pour chaque élément, son
+// prédécesseur d'abord (numéro inférieur), lui ensuite. Le prédécesseur d'un
+// élément est le plus souvent l'élément précédent du même tableau (numéros
+// contigus) : reconnu sans dichotomie. Il n'entre que s'il manque —
+// c'est-à-dire s'il n'a été livré nulle part.
+// Présence en O(1) ([DJ]) : quand la fin de la réserve est contiguë par
+// numéro (le cas courant — aucun tick perdu depuis), l'élément de numéro s
+// occupe le rang taille − 1 − (dernier numéro − s). Une égalité PROUVE la
+// présence (d'un élément livré : trail = 0) ; un désaccord ne prouve rien
+// (la dichotomie de poolInsert tranche ensuite). Motif : à l'historique, presque chaque tableau contient
+// les ticks des cinq ou six bougies suivantes (Diag 15 ≈ Diag 39 ≈ toutes les
+// bougies, chargement du 25/09 19:23) : chaque tick était relu, et cherché
+// par dichotomie, dans cinq ou six tableaux successifs — l'essentiel des
+// 34 % du versement au profileur de la v11.48, pas la purge.
+poolHasSerialFast(array<Tick> pool, int s) =>
+    int size = array.size(pool)
+    bool found = false
+    if size > 0 and not na(s)
+        int lastSerial = array.get(pool, size - 1).serial
+        int guess = size - 1 - (lastSerial - s)
+        if guess >= 0 and guess < size
+            Tick candidate = array.get(pool, guess)
+            // Un élément LIVRÉ seulement (trail = 0) : entré comme simple
+            // prédécesseur d'un autre tick, son propre prédécesseur n'a pas
+            // encore été traité — chemin normal (modèle : 0 écart sur
+            // 90 000 bougies ; sans cette condition, un prédécesseur manquant
+            // n'était plus versé).
+            found := candidate.serial == s and candidate.trail == 0
+    found
+
+// Verse un tableau dans la réserve, à COÛT BORNÉ ([CW]) : au plus
+// POOL_BLOCK_MAX éléments par tableau — les premiers à partir de startRank,
+// c'est-à-dire ses propres ticks puis les plus proches après sa clôture (un
+// tableau de dizaines de milliers d'éléments a été livré le 24/09) ; ajout
+// direct en fin de réserve quand le numéro et l'heure dépassent son dernier
+// élément (cas courant), dichotomie sinon. Numéro déjà présent : ignoré.
+// Heure qui casserait l'ordre : refusé. Au-delà de POOL_MAX +
+// POOL_PURGE_SLACK éléments, une seule recopie des POOL_MAX derniers ([DG] ;
+// jamais de décalages : des milliers d'entre eux ont causé l'erreur RE10022,
+// dix par bougie pesaient 28 % du temps). Renvoie la réserve, recopiée dans
+// ce cas. (Commentaire placé au-dessus de poolInsert jusqu'à la v11.52.)
+// startRank ([DK]) : premier rang versé — 0 pour tout le tableau ; à
+// l'historique (clôture connue), le rang du dernier élément daté avant la
+// clôture, les ticks propres qui le précèdent n'étant jamais servis par la
+// réserve (voir la fin du script).
+poolAbsorb(array<Tick> pool, array<int> times, array<int> serials, array<float> raws, array<int> states, array<float> warms, array<int> contexts, array<float> prices, array<float> references, array<int> trailTimes, array<int> trailSerials, array<float> trailRaws, array<int> trailStates, array<float> trailWarms, array<float> trailPrices, array<float> trailReferences, int sourceBar, int startRank, int deliveredFrom) =>
+    array<Tick> result = pool
+    int nextDeliveredFrom = deliveredFrom
+    int n = math.min(math.min(array.size(times), array.size(trailTimes)), POOL_BLOCK_MAX)
+    int k = math.max(startRank, 0)
+    int initialSize = array.size(pool)
+    int lastSerial = initialSize > 0 ? array.get(pool, initialSize - 1).serial : int(na)
+    // Les numeros du prefixe source sont strictement croissants : curSorted
+    // est obligatoire a l'appel. Aucune immutabilite intrabar n'est supposee.
+    while k < n
+        int s = array.get(serials, k)
+        bool inDeliveredSuffix = not na(nextDeliveredFrom) and not na(s) and s >= nextDeliveredFrom and s <= lastSerial
+        if inDeliveredSuffix
+            // Pour chaque numero de cette queue, poolHasSerialFast renverrait
+            // vrai : tous les numeros existent avec trail=0. Ces lignes
+            // n'auraient donc traite ni leur predecesseur ni leurs valeurs.
+            int afterKnown = lastIndexAtOrBefore(serials, lastSerial) + 1
+            k := math.max(k + 1, math.min(afterKnown, n))
+        else
+            // Au-dela du dernier numero, le test de presence serait faux.
+            // Reutiliser la borne locale plutot que relire la fin du tableau.
+            bool alreadyKnown = not na(lastSerial) and not na(s) and s <= lastSerial ? poolHasSerialFast(pool, s) : false
+            if not alreadyKnown
+                int context = array.get(contexts, k)
+                int trailSerial = array.get(trailSerials, k)
+                bool trailIsPrevious = k > 0 ? trailSerial == array.get(serials, k - 1) : false
+                if not trailIsPrevious
+                    [trailInserted, afterTrailFloor] = poolInsert(pool, trailSerial, array.get(trailTimes, k), array.get(trailRaws, k), array.get(trailStates, k), array.get(trailWarms, k), context, array.get(trailPrices, k), array.get(trailReferences, k), sourceBar, 1, nextDeliveredFrom)
+                    nextDeliveredFrom := afterTrailFloor
+                    if trailInserted and (na(lastSerial) or trailSerial > lastSerial)
+                        lastSerial := trailSerial
+                [tickInserted, afterTickFloor] = poolInsert(pool, s, array.get(times, k), array.get(raws, k), array.get(states, k), array.get(warms, k), context, array.get(prices, k), array.get(references, k), sourceBar, 0, nextDeliveredFrom)
+                nextDeliveredFrom := afterTickFloor
+                if tickInserted and (na(lastSerial) or s > lastSerial)
+                    lastSerial := s
+            k := k + 1
+    int excess = array.size(pool) - POOL_MAX
+    if excess > POOL_PURGE_SLACK
+        // Recopie des POOL_MAX derniers éléments dans un tableau neuf ([DG]) :
+        // la boucle de la v11.48. La variante native (array.copy sur
+        // array.slice, [DH]) a produit une réserve incohérente à la purge
+        // suivante (RE10045, 25/09) : retirée en [DI].
+        array<Tick> kept = array.new<Tick>()
+        int poolSize = array.size(pool)
+        for r = excess to poolSize - 1
+            array.push(kept, array.get(pool, r))
+        result := kept
+        if not na(nextDeliveredFrom)
+            nextDeliveredFrom := math.max(nextDeliveredFrom, array.get(kept, 0).serial)
+    [result, nextDeliveredFrom]
+
+// ── SÉLECTEUR COMMUN ([CX]) : LE CANDIDAT LE PLUS RÉCENT HORS TABLEAU PROPRE ──
+// Une seule règle pour la lecture différée (récupération, reprise rafraîchie)
+// et pour le bord vivant (mesure, reprise rafraîchie). Deux sources : un
+// tableau 1T vivant (avec ses numéros et ses contextes) et la réserve — la
+// lecture de secours, troisième source jusqu'à la v11.47, est retirée ([DG]).
+// Fenêtre [lower, upper] ; upper na = sans borne haute (le dernier
+// élément). serialCap ([CY]) : plafond de NUMÉRO pour la réserve, na = aucun —
+// au bord sans clôture connue, l'appartenance se prouve par le compte, pas
+// par l'heure. Si onlyNewer, seuls comptent les ticks plus récents que la
+// valeur tracée (newerThanShown). L'heure la plus tardive gagne ; à heure
+// égale le plus grand numéro. Un tick hors contexte 1T n'est
+// pas candidat ; un tick à ratio indéfini l'est ([CY] : il invalide la
+// couleur). Renvoie [source, rang, heure, numéro] ; source : −1 aucun, 0 le
+// tableau, 1 la réserve (2, la lecture de secours, n'existe plus).
+pickLatest(array<int> times, array<int> serials, array<int> contexts, bool sorted, array<Tick> pool, int lower, int upper, bool onlyNewer, int shownTime, int shownSerial, int serialCap) =>
+    int source = -1
+    int index = -1
+    int stamp = na
+    int serial = na
+    bool emptyWindow = not na(upper) and upper < lower
+    int size = math.min(array.size(times), SCAN_MAX)
+    int arrayUpper = not na(upper) ? upper : size > 0 ? array.get(times, size - 1) : na
+    [found0, index0, time0, serial0] = lastInWindow(times, serials, sorted and not emptyWindow, lower, arrayUpper)
+    int context0 = found0 ? array.get(contexts, index0) : na
+    if found0 and context0 == 1 and (not onlyNewer or newerThanShown(time0, serial0, shownTime, shownSerial))
+        source := 0
+        index := index0
+        stamp := time0
+        serial := serial0
+    int poolSize = array.size(pool)
+    bool poolCanWin = not emptyWindow and poolSize > 0
+    if poolCanWin and source == 0
+        // Toute la réserve précède sa fin : si même celle-ci ne bat pas
+        // le tableau propre, aucune recherche ne peut changer le choix.
+        Tick newest = array.get(pool, poolSize - 1)
+        poolCanWin := newest.stamp > stamp or (newest.stamp == stamp and newest.serial > serial)
+    int poolRank = not poolCanWin ? -1 : na(upper) ? poolSize - 1 : poolLastAtOrBefore(pool, upper)
+    if not na(serialCap) and poolRank >= 0 and array.get(pool, poolRank).serial > serialCap
+        int capRank = poolRankBySerial(pool, serialCap + 1) - 1
+        poolRank := math.min(poolRank, capRank)
+    if poolRank >= 0
+        Tick candidate = array.get(pool, poolRank)
+        if candidate.stamp >= lower and candidate.context == 1 and (not onlyNewer or newerThanShown(candidate.stamp, candidate.serial, shownTime, shownSerial)) and (na(stamp) or candidate.stamp > stamp or (candidate.stamp == stamp and candidate.serial > serial))
+            source := 1
+            index := poolRank
+            stamp := candidate.stamp
+            serial := candidate.serial
+    [source, index, stamp, serial]
+
+// Valeurs du candidat retenu — BP brut, état, préchauffage, contexte, prix,
+// référence — selon sa source (0 tableau, 1 réserve, 3 traîne du
+// tableau : le prédécesseur transporté par l'élément de rang index, [DE] ;
+// −1 : rien). Le contexte d'un prédécesseur est celui de son porteur.
+candidateValues(int source, int index, array<Tick> pool, array<float> raws, array<int> states, array<float> warms, array<int> contexts, array<float> prices, array<float> references, array<float> trailRaws, array<int> trailStates, array<float> trailWarms, array<float> trailPrices, array<float> trailReferences) =>
+    if source == 1
+        Tick candidate = array.get(pool, index)
+        [candidate.raw, candidate.state, candidate.warm, candidate.context, candidate.price, candidate.reference]
+    else
+        float raw = source == 3 ? array.get(trailRaws, index) : source == 0 ? array.get(raws, index) : na
+        int state = source == 3 ? array.get(trailStates, index) : source == 0 ? array.get(states, index) : 0
+        float warm = source == 3 ? array.get(trailWarms, index) : source == 0 ? array.get(warms, index) : na
+        int context = (source == 3 or source == 0) ? array.get(contexts, index) : na
+        float price = source == 3 ? array.get(trailPrices, index) : source == 0 ? array.get(prices, index) : na
+        float reference = source == 3 ? array.get(trailReferences, index) : source == 0 ? array.get(references, index) : na
+        [raw, state, warm, context, price, reference]
+
+// ── TRAÎNE : LE PRÉDÉCESSEUR TRANSPORTÉ LE PLUS RÉCENT ([DE]) ──
+// Parmi les TRAIL_SCAN_MAX premiers éléments d'un tableau vivant (les seuls
+// qui puissent transporter un tick de N : les numéros croissent avec le rang),
+// le prédécesseur daté dans [lower, upper] le plus tardif — à heure égale le
+// plus grand numéro —, en contexte 1T (celui du porteur), plus récent que la
+// valeur tracée si onlyNewer. Même fenêtre et mêmes règles que les autres
+// sources : la traîne ne prouve pas l'appartenance, un prédécesseur daté
+// d'une milliseconde de frontière reste écarté (Diag 63). Un tableau non trié
+// n'est pas lu. Renvoie [trouvé, rang du porteur, heure, numéro].
+const int TRAIL_SCAN_MAX = 16
+
+pickTrail(array<int> trailTimes, array<int> trailSerials, array<int> contexts, bool sorted, int lower, int upper, bool onlyNewer, int shownTime, int shownSerial) =>
+    bool found = false
+    int index = -1
+    int stamp = na
+    int serial = na
+    int n = sorted and (na(upper) or upper >= lower) ? math.min(math.min(array.size(trailTimes), array.size(contexts)), TRAIL_SCAN_MAX) : 0
+    if n > 0
+        for k = 0 to n - 1
+            int t = array.get(trailTimes, k)
+            // Ne lire numéro et contexte que si l'heure entre dans la fenêtre.
+            if not na(t) and t >= lower and (na(upper) or t <= upper)
+                int s = array.get(trailSerials, k)
+                if not na(s) and (not onlyNewer or newerThanShown(t, s, shownTime, shownSerial))
+                    int c = array.get(contexts, k)
+                    if c == 1 and (not found or t > stamp or (t == stamp and s > serial))
+                        found := true
+                        index := k
+                        stamp := t
+                        serial := s
+    [found, index, stamp, serial]
+
+// ── FRONTIÈRE PARTAGÉE : ATTRIBUTION PAR NUMÉRO ([DF], option, essai) ──
+// Quand la clôture de N et l'ouverture de N+1 tombent dans la même
+// milliseconde, l'heure ne départage plus rien : la fenêtre stricte écarte
+// tout candidat daté de cette milliseconde (Diag 63). Ici, UN SEUL candidat
+// est considéré, désigné par la structure de la livraison : le prédécesseur
+// transporté par le PREMIER élément du tableau de N+1, quand cet élément est
+// daté de l'ouverture de N+1 (c'est alors le premier tick de N+1, ou un tick
+// de N livré en retard) et que le prédécesseur est daté de la même
+// milliseconde (sinon la fenêtre stricte l'a déjà jugé). Dans les deux cas
+// le prédécesseur est un tick de N — sauf si le premier tick de N+1 n'a pas
+// été livré alors que le deuxième l'a été. Garde : son numéro ne dépasse pas
+// le plafond de compte (premier numéro propre + 9 ; sans bloc propre, dernier
+// numéro compté pour N−1 + 10 ; pas de plafond : rien) — hypothèse « une
+// barre 1T par transaction du graphique » (Diag 12 = 10,00, Diag 48 = 0 sur
+// l'historique) —, et il est postérieur au tick lu. Le premier élément
+// lui-même n'est jamais pris. Renvoie [source (3 traîne, −1 rien), rang 0,
+// heure, numéro].
+pickBoundary(array<int> times, array<int> contexts, array<int> trailTimes, array<int> trailSerials, bool sorted, int stamp, int serialCap, int minSerial) =>
+    bool found = false
+    int serial = na
+    if sorted and not na(stamp) and not na(serialCap) and array.size(times) > 0 and array.size(trailTimes) > 0 and array.size(contexts) > 0
+        int t0 = array.get(times, 0)
+        int c0 = array.get(contexts, 0)
+        int t1 = array.get(trailTimes, 0)
+        int s1 = array.get(trailSerials, 0)
+        if c0 == 1 and t0 == stamp and not na(s1) and t1 == stamp and s1 <= serialCap and (na(minSerial) or s1 > minSerial)
+            found := true
+            serial := s1
+    [found ? 3 : -1, found ? 0 : -1, found ? stamp : int(na), serial]
+
+// ============================================================================
+// MOTEUR COMPLET — CETTE FONCTION EST ÉVALUÉE DANS LE CONTEXTE 1T
+// ============================================================================
+// Formules conservees ; suivi du prechauffage et conversion de reference
+// allegés dans cet essai. Renvoie huit series par tick : BP brut, etat,
+// préchauffage, multiplicateur du contexte, référence d'amplitude, heure,
+// prix, numéro.
+
+bspEngine1T(
+    simple int length,
+    simple string kind,
+    simple bool weightedMode,
+    simple float capMultiplier,
+    simple float enterThreshold,
+    simple float requestedExitThreshold) =>
+    float safeMinimumTick = syminfo.mintick
+    float previousClose = nz(close[1], close)
+    float buyerRaw = close - math.min(low, previousClose)
+    float sellerRaw = math.max(high, previousClose) - close
+    float trueRange = buyerRaw + sellerRaw
+    // Amplitude testée en pas de cotation : un demi-pas sépare « aucun
+    // mouvement » de « au moins un pas », quel que soit l'arrondi.
+    bool validRange = trueRange / safeMinimumTick >= MIN_MOVE_TICKS
+
+    // Une répétition du même prix conserve la dernière répartition connue.
+    var float lastBuyerShare = 0.5
+    if validRange
+        lastBuyerShare := buyerRaw / trueRange
+    float buyerRatio = lastBuyerShare
+
+    var float rangeReference = na
+    // Meme quotient que precedemment ; conserve lorsque la reference gele.
+    // Var ordinaire : le cache suit le rollback de rangeReference.
+    var float referenceInTicks = na
+    float buyerEffective = 0.0
+    float rangeEffective = 0.0
+    if validRange
+        float previousReference = nz(
+            rangeReference[1],
+            math.max(trueRange, safeMinimumTick))
+        float maximumRange = capMultiplier * math.max(previousReference, safeMinimumTick)
+        float cappedRange = math.min(trueRange, maximumRange)
+        rangeEffective := cappedRange / safeMinimumTick
+        buyerEffective := buyerRatio * rangeEffective
+        // Mémoire comptée en TICKS 1T, gelée sur un tick sans amplitude.
+        rangeReference := (
+            na(rangeReference[1]) ?
+            cappedRange :
+            previousReference + (cappedRange - previousReference) / length)
+        referenceInTicks := (
+            na(rangeReference) ?
+            na :
+            rangeReference / safeMinimumTick)
+
+    // Le mode de mesure est un réglage : une seule des deux branches est
+    // empruntée pendant tout le calcul, donc les séries restent cohérentes.
+    float ratioAverage = na
+    float buyerAverage = na
+    float rangeAverage = na
+    if weightedMode
+        buyerAverage := movingAverage(buyerEffective, length, kind)
+        rangeAverage := movingAverage(rangeEffective, length, kind)
+    else
+        ratioAverage := movingAverage(buyerRatio, length, kind)
+
+    // rangeAverage est en pas de cotation : seuil 1e-8 pas, au-dessus de la
+    // précision des comparaisons Pine.
+    bool weightedDenominatorReady = not na(rangeAverage) and rangeAverage > MIN_RANGE_TICKS
+    float buyerPercentRaw = (
+        weightedMode ?
+        (weightedDenominatorReady ? buyerAverage / rangeAverage * 100.0 : na) :
+        ratioAverage * 100.0)
+
+    float buyerPercentClamped = (
+        na(buyerPercentRaw) ?
+        na :
+        clamp(buyerPercentRaw, 0.0, 100.0))
+
+    bool recursiveAverage = kind == "EMA" or kind == "RMA"
+    int warmupTarget = recursiveAverage ? 3 * length : 2 * length
+    var int processedTickCount = 0
+    // Une fois le compteur sature, sa valeur reste exactement warmupTarget.
+    // Var ordinaire : aucune accumulation des executions non confirmees.
+    if processedTickCount < warmupTarget
+        processedTickCount := processedTickCount + 1
+
+    bool hasCalculatedValue = not na(buyerPercentClamped)
+    bool engineWarm = hasCalculatedValue and processedTickCount >= warmupTarget
+
+    float engineSpread = hasCalculatedValue ? 2.0 * buyerPercentClamped - 100.0 : na
+
+    float exitThreshold = math.max(requestedExitThreshold, enterThreshold)
+    var int signalState = 0
+    signalState := (
+        engineWarm ?
+        nextSignalState(signalState, engineSpread, enterThreshold, exitThreshold) :
+        0)
+
+    // A saturation, l'expression precedente vaut exactement 100.0.
+    // Avant saturation, conserver son calcul et son ordre arithmetique.
+    float warmupPercent = processedTickCount >= warmupTarget ? 100.0 : math.min(
+        processedTickCount / math.max(float(warmupTarget), 1.0) * 100.0,
+        100.0)
+
+    int requestedTimeframeMultiplier = timeframe.isticks ? timeframe.multiplier : -1
+
+    // Heure du tick 1T.
+    int tickTime = time
+    // Prix du tick 1T : le dernier tick d'une bougie close porte sa clôture 10T.
+    float tickClose = close
+    // Numéro du tick 1T : identifiant DANS CETTE EXÉCUTION seulement (il change
+    // au rechargement). Sert à la couverture et à la réserve.
+    int tickSerial = bar_index
+
+    [buyerPercentRaw, signalState, warmupPercent, requestedTimeframeMultiplier, referenceInTicks, tickTime, tickClose, tickSerial]
+
+// ── TRAÎNE ([DE]) : CHAQUE TICK LIVRÉ TRANSPORTE SON PRÉDÉCESSEUR ──
+// Enveloppe évaluée dans le contexte 1T, comme le moteur, qu'elle appelle
+// sans le modifier. Les séries du moteur y ont un historique : [1] est la
+// barre 1T PRÉCÉDENTE de ce contexte — livrée ou non au graphique. Le
+// prédécesseur voyage avec le tick (BP brut, état, préchauffage, référence,
+// heure, prix, numéro : sept séries de plus, quinze en tout ; le multiplicateur
+// du contexte est le même pour tous ses ticks). Utilité : la fin d'une bougie
+// perdue par la livraison (Diag 41, 43) est retrouvée par le premier tick
+// livré de la suivante — si elle le précède immédiatement (profondeur 1).
+bspEngine1TWithTrail(
+    simple int length,
+    simple string kind,
+    simple bool weightedMode,
+    simple float capMultiplier,
+    simple float enterThreshold,
+    simple float requestedExitThreshold) =>
+    [engineRaw, engineState, engineWarm, engineContext, engineReference, engineStamp, enginePrice, engineSerial] = bspEngine1T(length, kind, weightedMode, capMultiplier, enterThreshold, requestedExitThreshold)
+    float trailRaw = engineRaw[1]
+    int trailState = engineState[1]
+    float trailWarm = engineWarm[1]
+    float trailReference = engineReference[1]
+    int trailStamp = engineStamp[1]
+    float trailPrice = enginePrice[1]
+    int trailSerial = engineSerial[1]
+    [engineRaw, engineState, engineWarm, engineContext, engineReference, engineStamp, enginePrice, engineSerial, trailRaw, trailState, trailWarm, trailReference, trailStamp, trailPrice, trailSerial]
+
+// HMA à poids négatifs : WMA pour le ratio pondéré, sans changer les formules.
+string effectiveAverageType = rangeWeightedMode and averageType == "HMA" ? "WMA" : averageType
+
+// ============================================================================
+// AGRÉGATION 1T → 10T
+// ============================================================================
+
+[rawBuyerTicks, stateTicks, warmupTicks, engineTimeframeTicks, referenceTicks, timeTicks, closeTicks, serialTicks, trailRawTicks, trailStateTicks, trailWarmTicks, trailReferenceTicks, trailTimeTicks, trailCloseTicks, trailSerialTicks] = request.security_lower_tf(
+    syminfo.tickerid,
+    ENGINE_TIMEFRAME,
+    bspEngine1TWithTrail(
+        lengthInput,
+        effectiveAverageType,
+        rangeWeightedMode,
+        rangeCapMultiplier,
+        neutralEnterSpread,
+        neutralExitSpread),
+    calc_bars_count = tickHistoryInput)
+
+// La LECTURE DE SECOURS ([CV], v11.36 à v11.47 : le même moteur dans un second
+// contexte 1T, lu par request.security) est RETIRÉE en [DG] : ancien Diag 64
+// (v11.36–v11.47) = 0 sur
+// toutes les captures (rafales, calme, ouverture US), jamais lue au bord
+// ([DC]), et 18,6 % du temps d'exécution au profileur — une évaluation
+// complète du moteur sur tout l'historique 1T pour rien.
+
+// ============================================================================
+// LECTURE DE LA BOUGIE N, DEPUIS N+1 — SON PROPRE TABLEAU FAIT FOI
+// ============================================================================
+// request.security_lower_tf rattache chaque tick 1T à une bougie 10T : ce
+// rattachement EST l'appartenance. Les bornes vérifient et signalent ; elles
+// n'attribuent pas.
+
+bool hasPrevBar = not barstate.isfirst and bar_index >= 1
+
+array<float> raw1 = hasPrevBar ? rawBuyerTicks[1] : array.new<float>()
+array<int> state1 = hasPrevBar ? stateTicks[1] : array.new<int>()
+array<float> warm1 = hasPrevBar ? warmupTicks[1] : array.new<float>()
+array<int> context1 = hasPrevBar ? engineTimeframeTicks[1] : array.new<int>()
+array<float> reference1 = hasPrevBar ? referenceTicks[1] : array.new<float>()
+array<int> times1 = hasPrevBar ? timeTicks[1] : array.new<int>()
+array<float> close1 = hasPrevBar ? closeTicks[1] : array.new<float>()
+array<int> serial1 = hasPrevBar ? serialTicks[1] : array.new<int>()
+// La traîne du tableau figé n'est plus relue ici : ses prédécesseurs ont été
+// versés dans la réserve avec lui, à son exécution confirmée ([DG] ; les sept
+// lectures [1] mortes de la v11.48 sont retirées en [DH]).
+
+int count0 = array.size(timeTicks)
+int count1 = array.size(times1)
+bool oversizedBlock = count1 > PLAUSIBLE_TICK_CAP
+
+// Les dichotomies supposent un tableau trié par heure : le tableau vivant est
+// vérifié ici à chaque exécution ; le tableau figé, une fois par bougie
+// (résultat mémorisé à l'exécution confirmée de N, [DU], ci-dessous). Un bloc
+// non trié est écarté (aucune mesure) et compté au Diag 49.
+bool blockAligned = array.size(raw1) == count1 and array.size(state1) == count1 and array.size(warm1) == count1 and array.size(context1) == count1 and array.size(reference1) == count1 and array.size(close1) == count1
+// [DU] Le tableau figé de N est le tableau vivant de N à son exécution
+// confirmée (même hypothèse que le versement unique, [DG]) : son tri y a été
+// vérifié et mémorisé (fin de script). Re-vérifié seulement si la mémoire ne
+// décrit pas cette bougie-là, avec cette taille-là.
+var int sortedMemoBar = na
+var int sortedMemoCount = na
+var bool sortedMemoValue = false
+bool frozenSortKnown = hasPrevBar and sortedMemoBar == bar_index - 1 and sortedMemoCount == count1
+bool blockSorted = blockAligned and (frozenSortKnown ? sortedMemoValue : isSorted(times1, serial1))
+bool curAligned = array.size(rawBuyerTicks) == count0 and array.size(stateTicks) == count0 and array.size(warmupTicks) == count0 and array.size(engineTimeframeTicks) == count0 and array.size(referenceTicks) == count0 and array.size(closeTicks) == count0 and array.size(trailRawTicks) == count0 and array.size(trailStateTicks) == count0 and array.size(trailWarmTicks) == count0 and array.size(trailReferenceTicks) == count0 and array.size(trailTimeTicks) == count0 and array.size(trailCloseTicks) == count0 and array.size(trailSerialTicks) == count0
+bool curTimesSorted = isSorted(timeTicks, serialTicks)
+bool curSorted = curAligned and curTimesSorted
+
+// ── RÉSERVE ──
+// Déclarée ici, versée en FIN de script ([DG]) : chaque bougie y verse son
+// tableau vivant une fois, à son exécution confirmée. Coût borné par tableau
+// ([CW]) ; recopie unique à la purge. Un tableau non trié n'est pas versé
+// ([CX]) : écarté entièrement, comme le Diag 49 l'annonce. Depuis
+// [DF], chaque élément verse aussi son prédécesseur transporté : un tick que
+// la livraison a perdu mais qu'un élément voisin transporte — dans le tableau
+// de N lui-même (tick 11 rangé en queue de N, transportant le 10), ou dans
+// tout tableau figé déjà vu — devient lisible par la lecture différée, la
+// reprise rafraîchie et le bord, sous les règles de la réserve.
+var array<Tick> tickPool = array.new<Tick>()
+// Plus petit numero de la queue contigue certifiee LIVREE (trail=0).
+// Var ordinaire : mise a jour seulement avec le versement confirme.
+var int poolDeliveredFrom = na
+// VERSEMENT UNIQUE ([DG]) : jusqu'à la v11.47, le tableau figé de N−1 était
+// reversé à CHAQUE exécution de N (28 % du temps au profileur) — le retour en
+// arrière du var à chaque mise à jour l'y obligeait. Désormais chaque bougie
+// verse son propre tableau vivant une seule fois, à son exécution confirmée,
+// en FIN de script (après toutes les lectures) : à chaque exécution de N+1, la
+// réserve contient le tableau de N tel que [1] le rend — même contenu, même
+// source, mêmes lectures ; le Diag 10 vérifie l'hypothèse (taille du tableau
+// figé = taille à l'exécution confirmée). Voir tout en bas du script.
+
+// Bornes EXACTES de N, sans tolérance : elles vérifient, elles ne sélectionnent
+// pas. Sans heure de clôture, l'ouverture de N+1 exclue en tient lieu.
+int prevOpen = time[1]
+float prevClose = close[1]
+bool prevCloseKnown = hasPrevBar and not na(time_close[1]) and time_close[1] >= prevOpen
+int exactUpper = prevCloseKnown ? time_close[1] : time - 1
+
+// FRONTIÈRES PARTAGÉES ([CJ], [CN]) : une milliseconde commune à deux bougies
+// ne prouve rien — ni le numéro 1T ni le prix n'y rattachent un tick.
+//   — Le TABLEAU PROPRE de N fait foi jusqu'à la clôture de N INCLUSE
+//     (exactUpper) : une bougie close ne recule jamais derrière ce que son
+//     bord a montré, sauf pour écarter un tick daté APRÈS sa clôture — hors
+//     direct, où la clôture n'est pas connue (LIMITES, [DU]). Une
+//     lecture datée de la milliseconde partagée est gardée et signalée
+//     (Diag 27, 39, qualité 2) : indécidable, pas fausse.
+//   — Un TABLEAU VOISIN n'a pas l'attribution du fournisseur : un tick n'y est
+//     lu pour N que daté STRICTEMENT à l'intérieur de N — [certainLower,
+//     neighbourUpper] —, jamais à l'ouverture de N+1, ni à celle de N quand la
+//     clôture de N−1 n'est pas connue antérieure.
+int neighbourUpper = math.min(exactUpper, time - 1)
+bool lowerBoundaryClear = bar_index >= 2 and not na(time_close[2]) and time_close[2] < prevOpen
+int certainLower = lowerBoundaryClear ? prevOpen : prevOpen + 1
+
+// VERROU ([CN]) : time_close d'une bougie close est-il l'heure de sa dernière
+// transaction, ou l'ouverture de la suivante ? Une clôture observée
+// ANTÉRIEURE à l'ouverture suivante exclut la seconde définition ; le verrou
+// est alors activé pour toute l'exécution (Diag 25 = 2) et le tableau propre
+// est lu jusqu'à la clôture incluse. Tant qu'il ne l'est pas, le tableau
+// propre suit la borne stricte des voisins et la série peut reculer d'un tick
+// derrière le bord à une frontière partagée. Pas d'activation sur la première
+// bougie d'une séance, où l'antériorité ne prouve rien.
+var bool closeIsLastTrade = false
+if hasPrevBar and prevCloseKnown and not session.isfirstbar and time_close[1] < time
+    closeIsLastTrade := true
+int ownUpper = closeIsLastTrade ? exactUpper : neighbourUpper
+// [DU] DIRECT : clôture de N inconnue pendant N+1 (time_close est na à
+// l'exécution confirmée d'une bougie en ticks, Diag 47), donc ownUpper =
+// ouverture de N+1 − 1 même verrou actif, et le dernier tick de N daté de la
+// milliseconde partagée — montré par le bord, relu au rechargement — était
+// écarté. Verrou actif et clôture inconnue : la lecture stricte est
+// prolongée, comme au bord, jusqu'à l'ouverture de N+1 INCLUSE et sous le
+// plafond de compte « premier numéro daté dès l'ouverture de N + 9 » ([DC]).
+// Heures et numéros étant triés ensemble (isSorted), le minimum des deux
+// rangs est le dernier élément qui respecte les deux bornes ; le maximum avec
+// la lecture stricte garde tout ce qu'elle lisait.
+// Garde de tête : le premier numéro daté dès l'ouverture de N ne dépasse pas
+// le dernier numéro connu de N−1 + 1 — compté dans ses bornes
+// (previousLastSerial) ou tracé (lastShownSerial) —, sinon le plafond
+// pourrait admettre des ticks de N+1. Jamais en deçà de la lecture stricte
+// (math.max plus bas). Option « plafond prudent », ou N dernière bougie de
+// sa séance (session.isfirstbar pour N+1 : N peut compter moins de dix ticks
+// et le plafond déborderait sur la séance suivante) : lecture stricte.
+// Dernier numéro compté pour la bougie précédente et dernier tick tracé — ou
+// invalidant — (heure, numéro) : déclarés ici (garde de tête ci-dessous) ;
+// mis à jour dans la couverture et au pont.
+var int previousLastSerial = na
+var int lastShownSerial = na
+var int lastShownTime = na
+bool liveOwnRead = hasPrevBar and blockSorted and closeIsLastTrade and not prevCloseKnown and not edgeCapPrudent and not session.isfirstbar
+// Recherche pure partagée : le tableau figé ne change pas dans cette exécution.
+int firstInBoundsIndex = count1 > 0 and blockSorted ? firstIndexAtOrAfter(times1, prevOpen) : count1
+int liveScan = math.min(count1, SCAN_MAX)
+int liveFirstIndex = liveOwnRead and count1 > 0 ? firstInBoundsIndex : liveScan
+int liveFirstSerial = liveOwnRead and liveFirstIndex < liveScan ? array.get(serial1, liveFirstIndex) : na
+bool liveHeadPresent = not na(liveFirstSerial) and ((not na(previousLastSerial) and liveFirstSerial <= previousLastSerial + 1) or (not na(lastShownSerial) and liveFirstSerial <= lastShownSerial + 1))
+int liveOwnCap = liveHeadPresent ? liveFirstSerial + EXPECTED_TICKS - 1 : na
+
+// Tick lu : dernier élément du tableau de N daté dans [ouverture, ownUpper]
+// — en direct sous verrou, prolongé à l'ouverture de N+1 sous plafond ([DU]).
+// Un élément daté après la clôture est écarté et compté (Diag 27, 39).
+// boundsLastIndex : dernier élément ≤ exactUpper (bornes de contrôle, pour la
+// couverture) ; identique au tick lu dès que le Diag 25 vaut 2 et la clôture
+// est connue.
+int boundsLastIndex = hasPrevBar and blockSorted ? lastIndexAtOrBefore(times1, exactUpper) : -1
+int boundsLastTime = boundsLastIndex >= 0 ? array.get(times1, boundsLastIndex) : na
+bool boundsHasTick = hasPrevBar and blockSorted and boundsLastIndex >= 0 and boundsLastTime >= prevOpen
+// [DU] Même dichotomie que boundsLastIndex dès que ownUpper = exactUpper ;
+// en direct sous verrou, tête de N présente : lecture stricte prolongée
+// (math.max / math.min, liveOwnCap ci-dessus).
+int candidateIndex = not hasPrevBar or not blockSorted ? -1 : not na(liveOwnCap) ? math.max(boundsLastIndex, math.min(lastIndexAtOrBefore(times1, time), lastIndexAtOrBefore(serial1, liveOwnCap))) : ownUpper == exactUpper ? boundsLastIndex : lastIndexAtOrBefore(times1, ownUpper)
+int candidateTime = candidateIndex >= 0 ? array.get(times1, candidateIndex) : na
+// La borne basse conditionne aussi l'acceptation : un tableau sans élément
+// dans [ouverture, clôture] n'est pas une source (Diag 17, 30) — en direct,
+// une bougie tout entière dans la milliseconde d'ouverture de N+1 est lue
+// par la lecture prolongée ([DU]) et n'est alors pas comptée au Diag 17.
+bool hasRead = hasPrevBar and blockSorted and candidateIndex >= 0 and candidateTime >= prevOpen
+// Le prix ne sert qu'au contrôle (Diag 35), jamais à la sélection : un prix
+// égal n'est pas un état égal du moteur ([CR]).
+int readTickIndex = hasRead ? candidateIndex : -1
+bool skippedTail = blockSorted and count1 > 0 and candidateIndex < count1 - 1
+
+int readTickTime = hasRead ? array.get(times1, readTickIndex) : na
+float readRaw = hasRead ? array.get(raw1, readTickIndex) : na
+int readState = hasRead ? array.get(state1, readTickIndex) : 0
+float readWarmup = hasRead ? array.get(warm1, readTickIndex) : na
+float readReference = hasRead ? array.get(reference1, readTickIndex) : na
+float readTickClose = hasRead ? array.get(close1, readTickIndex) : na
+int readContext = hasRead ? array.get(context1, readTickIndex) : na
+
+// ── CONTRÔLE DU CONTEXTE ──
+// na, et non 1, sans lecture : un contrôle non effectué ne doit pas
+// ressembler à un contrôle réussi.
+int contextMultiplier = hasRead ? readContext : na
+bool wrongContext = hasRead and (na(contextMultiplier) or contextMultiplier != 1)
+
+// ── VÉRIFICATION DU RATTACHEMENT ──
+// Les éléments hors bornes sont comptés : un rattachement incohérent du
+// fournisseur se signale, il ne s'absorbe pas.
+// Premier élément daté à l'ouverture de N ou après ; ceux qui le précèdent
+// sont datés AVANT l'ouverture.
+// [DU] Compte dans [prevOpen, exactUpper] à partir des deux dichotomies déjà
+// faites (firstInBoundsIndex, boundsLastIndex) ; countBetween retiré.
+int inBoundsCount = count1 > 0 and blockSorted and firstInBoundsIndex <= boundsLastIndex ? boundsLastIndex - firstInBoundsIndex + 1 : 0
+int outOfBoundsCount = count1 - inBoundsCount
+int attributedCount = inBoundsCount
+// Frontière indécidable par l'horodatage seul : soit le dernier tick retenu est
+// daté à l'ouverture de N+1, soit des éléments du tableau dépassent la borne
+// haute et ont donc été écartés.
+bool boundaryShared = hasPrevBar and ((hasRead and readTickTime >= time) or skippedTail)
+// Frontière BASSE du tableau propre : tick lu daté de l'ouverture de N sans
+// clôture de N−1 connue antérieure — peut être une transaction de N−1 livrée
+// en retard. Lu quand même (le dernier de cette milliseconde est celui de N
+// dès que N en a un), mais AMBIGU : qualité 2, Diag 27.
+bool boundaryLower = hasRead and readTickTime == prevOpen and not lowerBoundaryClear
+// Le dernier tick d'une bougie a le prix de sa clôture : contrôle déplacé
+// après la sélection ([DF]), sur le tick TRACÉ (priceMismatch, plus bas).
+
+bool emptyBar = hasPrevBar and count1 == 0
+bool staleData = hasPrevBar and count1 > 0 and blockSorted and inBoundsCount == 0 and not hasRead
+bool unsortedBlock = hasPrevBar and not blockSorted
+bool hasIntrabar = hasRead and not wrongContext
+int barTickCount = hasIntrabar ? attributedCount : na
+// COMPTE DE CADENCE ([CS]) : les Diag 12, 32 et 33 comptent les éléments DANS
+// LES BORNES. Un élément hors bornes ne dit rien de la cadence et n'exclut pas
+// la bougie. L'exclut : un compte qui atteint l'ouverture de la suivante
+// (countedToNextOpen) ; une lecture datée de l'ouverture sans clôture de N−1
+// connue antérieure (boundaryLower) ; des éléments datés avant l'ouverture
+// alors que la clôture de N−1 n'est pas connue antérieure (headUnattributable :
+// les retardataires datés de la milliseconde d'ouverture seraient comptés) ;
+// un recouvrement de numéros (serialOverlap, plus bas) ; et, clôture inconnue,
+// tout élément après la borne de contrôle (boundsTailSkipped, [DU] — égal à
+// l'ancien skippedTail hors lecture prolongée du direct).
+bool countedToNextOpen = boundsHasTick and boundsLastTime >= time
+bool headUnattributable = firstInBoundsIndex > 0 and not lowerBoundaryClear
+// cadenceUsable est assemblé plus bas, après serialOverlap.
+
+// Numéros du bloc DANS LES BORNES de N (déclarés ici, utilisés par la
+// couverture plus bas et par la frontière partagée [DF]) ; le dernier numéro
+// compté pour la bougie précédente (previousLastSerial) est déclaré plus haut.
+bool serialBlockUsable = boundsHasTick and firstInBoundsIndex <= boundsLastIndex
+int blockFirstSerial = serialBlockUsable ? array.get(serial1, firstInBoundsIndex) : na
+int blockLastSerial = serialBlockUsable ? array.get(serial1, boundsLastIndex) : na
+// Numéro du tick lu dans le tableau propre.
+int readSerial = hasRead ? array.get(serial1, readTickIndex) : na
+
+// ── AUTRES SOURCES : BOUGIE PERDUE [CD], FIN MANQUANTE [CK] ──
+// Les ticks de N sont aussi cherchés dans le tableau de la bougie EN COURS
+// (livraison en retard, lu directement car encore vivant) et dans la RÉSERVE
+// (tous les tableaux figés déjà vus : flux en avance, [CU]). Un tick pris hors
+// du tableau propre n'a pas l'attribution du fournisseur : il n'est retenu
+// que daté STRICTEMENT à l'intérieur de N ; l'heure la plus tardive gagne, à
+// heure égale le numéro le plus grand. Sans lecture propre : récupération
+// (Diag 57) ; avec une lecture propre, un candidat plus récent remplace le
+// tick AFFICHÉ (fin récupérée, Diag 62). Rien n'est reconstitué.
+// Sélecteur commun ([CX]) : bougie en cours et réserve, dans [certainLower,
+// neighbourUpper] ; contexte 1T exigé par le sélecteur. Puis la TRAÎNE de la
+// bougie en cours ([DE]) : le prédécesseur transporté par chacun de ses
+// premiers éléments, même fenêtre, même règle — l'heure la plus tardive gagne,
+// à heure égale le plus grand numéro. Source 3.
+// [DU] var : jamais écrit, inutile de l'allouer à chaque exécution.
+var array<int> emptyInts = array.new<int>()
+array<int> recTimes0 = hasPrevBar ? timeTicks : emptyInts
+array<int> recSerials0 = hasPrevBar ? serialTicks : emptyInts
+array<int> recContexts0 = hasPrevBar ? engineTimeframeTicks : emptyInts
+array<int> recTrailTimes0 = hasPrevBar ? trailTimeTicks : emptyInts
+array<int> recTrailSerials0 = hasPrevBar ? trailSerialTicks : emptyInts
+[latestSourceKind, latestIndex, latestTime, latestSerial] = pickLatest(recTimes0, recSerials0, recContexts0, curSorted, tickPool, certainLower, neighbourUpper, false, int(na), int(na), int(na))
+[recTrailFound, recTrailIndex, recTrailTime, recTrailSerial] = pickTrail(recTrailTimes0, recTrailSerials0, recContexts0, curSorted, certainLower, neighbourUpper, false, int(na), int(na))
+bool recTrailWins = recTrailFound and (latestSourceKind < 0 or recTrailTime > latestTime or (recTrailTime == latestTime and (na(latestSerial) or recTrailSerial > latestSerial)))
+// FRONTIÈRE PARTAGÉE PAR NUMÉRO ([DF], option) : clôture de N connue et datée
+// de la milliseconde d'ouverture de N+1. Plafond de compte : premier numéro
+// propre + 9 ; sans bloc propre, dernier numéro compté pour N−1 + 10 (trop bas
+// d'autant si la fin de N−1 est perdue : jamais en avance de ce côté-là). Le
+// candidat (prédécesseur du premier élément de N+1) est daté de cette
+// milliseconde, donc postérieur à tout candidat de la fenêtre stricte : s'il
+// existe, il l'emporte.
+bool boundaryMs = hasPrevBar and prevCloseKnown and exactUpper == time
+int boundaryCap = serialBlockUsable ? blockFirstSerial + EXPECTED_TICKS - 1 : (na(previousLastSerial) ? na : previousLastSerial + EXPECTED_TICKS)
+int bndSourceKind = -1
+int bndIndex = -1
+int bndTime = na
+int bndSerial = na
+if boundaryByCount and boundaryMs
+    [pickSourceB, pickIndexB, pickTimeB, pickSerialB] = pickBoundary(recTimes0, recContexts0, recTrailTimes0, recTrailSerials0, curSorted, exactUpper, boundaryCap, readSerial)
+    bndSourceKind := pickSourceB
+    bndIndex := pickIndexB
+    bndTime := pickTimeB
+    bndSerial := pickSerialB
+bool recByCount = bndSourceKind >= 0
+int recSourceKind = recByCount ? bndSourceKind : recTrailWins ? 3 : latestSourceKind
+int recIndex = recByCount ? bndIndex : recTrailWins ? recTrailIndex : latestIndex
+int recTime = recByCount ? bndTime : recTrailWins ? recTrailTime : latestTime
+int recSerial = recByCount ? bndSerial : recTrailWins ? recTrailSerial : latestSerial
+bool recFound = recSourceKind >= 0
+bool recFromPool = recSourceKind == 1
+bool recFromTrail = recSourceKind == 3
+// Prédécesseur transporté versé dans la réserve ([DF]) : même valeur qu'un
+// élément livré, source distinguée au Diag 58 (−7).
+bool recFromPoolTrail = recFromPool ? array.get(tickPool, recIndex).trail == 1 : false
+int recSource = (recSourceKind == 0 or recFromTrail) ? bar_index : recFromPool ? array.get(tickPool, recIndex).source : na
+// Rang du tableau d'où vient le tick : 0 la bougie en cours, 2 la bougie N−1,
+// 3 N−2… ; la traîne vient de la bougie en cours (rang 0) et se code −5 au
+// Diag 58 ; un prédécesseur de la réserve, −7.
+int recOffset = not recFound ? -1 : bar_index - recSource
+[recRaw, recState, recWarmup, recContext, recClose, recReference] = candidateValues(recSourceKind, recIndex, tickPool, rawBuyerTicks, stateTicks, warmupTicks, engineTimeframeTicks, closeTicks, referenceTicks, trailRawTicks, trailStateTicks, trailWarmTicks, trailCloseTicks, trailReferenceTicks)
+// Le contexte 1T est exigé par le sélecteur : un candidat trouvé est utilisable.
+bool neighbourUsable = recFound
+// Récupération [CD] : aucune lecture propre, un tick de N prouvé ailleurs.
+// Mémoire du dernier tick tracé — ou invalidant — (heure, numéro) : déclarée
+// plus haut (garde de tête du direct, [DU]), lue par la garde des mesures
+// ([CZ]) ; mise à jour au pont.
+// [DO] Heure du dernier VRAI tick du moteur qui a alimenté la série (mesure,
+// reprise rafraîchie, calcul indéfini, reprise invalidée) : l'estimation ne
+// la redate pas, contrairement à lastShownTime. Sert à la fenêtre en secondes
+// de l'estimation, série et bord.
+var int lastEngineTickTime = na
+// Prix et référence d'amplitude du tick dont vient la valeur tracée ([DD] :
+// base de l'estimation d'une bougie sans tick), et la dernière valeur tracée
+// avec son état et sa force (déclarées ici : l'estimation les lit avant le
+// pont, qui les met à jour).
+var float lastShownPrice = na
+var float lastShownReference = na
+var float lastBuyer = na
+var int lastState = 0
+var float lastStrength = 0.0
+// [DU] Le dernier tick tracé était-il préchauffé ? Une estimation n'a pas
+// d'information de préchauffage : elle reste grise tant que sa base ne l'est
+// pas (promesse de « Masquer pendant le préchauffage », case décochée).
+var bool lastShownWarm = false
+bool recovered = not hasRead and neighbourUsable
+// Fin récupérée : lecture propre valide et un tick de N plus récent prouvé
+// ailleurs — numéro supérieur. Il
+// remplace le tick lu pour l'AFFICHAGE seulement.
+bool recLaterThanRead = recSerial > readSerial
+bool tailRecovered = hasRead and not wrongContext and neighbourUsable and recLaterThanRead
+bool fromNeighbour = recovered or tailRecovered
+// L'affichage suit le tick retenu ; rattachement et couverture restent sur le
+// tableau propre.
+bool measureCandidate = hasIntrabar or recovered
+int shownTickTime = fromNeighbour ? recTime : hasRead ? readTickTime : na
+float shownTickClose = fromNeighbour ? recClose : hasRead ? readTickClose : na
+int shownTickSerial = fromNeighbour ? recSerial : hasRead ? readSerial : na
+// GARDE « NE JAMAIS RECULER » ÉTENDUE AUX MESURES ([CZ]) : un tick retenu qui
+// n'est pas plus récent que le dernier tick tracé ou invalidant — numéro
+// quand il est comparable, sinon l'heure — est un tick DÉJÀ DÉPASSÉ (ancien
+// tick rangé par le fournisseur dans le tableau de la bougie suivante à une
+// frontière partagée, recouvrement de numéros). Il ne fait pas de mesure : la
+// bougie est reprise, la mémoire n'est pas touchée (Diag 20 = 3 ; Diag 27
+// compte déjà le recouvrement). Une mesure ne peut donc pas réactiver une
+// couleur après une invalidation plus récente.
+bool staleMeasure = measureCandidate and not newerThanShown(shownTickTime, shownTickSerial, lastShownTime, lastShownSerial)
+bool hasMeasure = measureCandidate and not staleMeasure
+if staleMeasure
+    recovered := false
+    tailRecovered := false
+    fromNeighbour := false
+// Le dernier tick d'une bougie a le prix de sa clôture : contrôle sur le tick
+// TRACÉ ([DF] — jusqu'à la v11.46, sur le tick lu dans le tableau propre,
+// avant récupération : une fin récupérée par la traîne restait comptée en
+// écart). Diag 35, qualité.
+bool priceMismatch = hasMeasure and not na(shownTickClose) and math.abs(shownTickClose - prevClose) / syminfo.mintick >= MIN_MOVE_TICKS
+
+// ── REPRISE RAFRAÎCHIE — AUCUNE ATTENTE ([CH]) ──
+// Bougie sans aucun tick prouvé : la reprise prend le tick du moteur le plus
+// frais déjà reçu, daté strictement avant l'ouverture de N+1, plus récent que
+// la valeur tracée (newerThanShown), dans la même séance, en contexte 1T.
+// Sources : bougie en cours, sa traîne, réserve ; le plus tardif
+// gagne. Sans candidat : reprise simple. Un tick plus ancien que la bougie
+// reste une REPRISE, jamais une mesure (Diag 11, 58, qualité 0).
+var int sessionStartTime = na
+bool finalBarOpensSession = session.isfirstbar[1]
+if hasPrevBar and finalBarOpensSession
+    sessionStartTime := prevOpen
+bool refreshNeeded = hasPrevBar and not hasMeasure and not wrongContext and not finalBarOpensSession
+int refreshLower = na(sessionStartTime) ? 0 : sessionStartTime
+// Sélecteur commun ([CX]) : mêmes sources, fenêtre [refreshLower,
+// neighbourUpper], plus récent que la valeur tracée.
+int refreshSourceKind = -1
+int refreshIndex = -1
+int refreshTime = na
+int refreshSerial = na
+if refreshNeeded
+    // Même borne haute que la récupération stricte déjà calculée. Si elle
+    // a un candidat, élargir vers le passé ne peut trouver plus récent ;
+    // resserrer la borne basse ou exiger plus récent ne change pas le maximum.
+    // Le candidat de frontière par numéro est exclu de ce partage.
+    int strictSource = recTrailWins ? 3 : latestSourceKind
+    if strictSource >= 0
+        int strictIndex = recTrailWins ? recTrailIndex : latestIndex
+        int strictTime = recTrailWins ? recTrailTime : latestTime
+        int strictSerial = recTrailWins ? recTrailSerial : latestSerial
+        if strictTime >= refreshLower and newerThanShown(strictTime, strictSerial, lastShownTime, lastShownSerial)
+            refreshSourceKind := strictSource
+            refreshIndex := strictIndex
+            refreshTime := strictTime
+            refreshSerial := strictSerial
+    else
+        [pickSource, pickIndex, pickTime, pickSerial] = pickLatest(recTimes0, recSerials0, recContexts0, curSorted, tickPool, refreshLower, neighbourUpper, true, lastShownTime, lastShownSerial, int(na))
+        refreshSourceKind := pickSource
+        refreshIndex := pickIndex
+        refreshTime := pickTime
+        refreshSerial := pickSerial
+        // Sans candidat strict, la fenêtre antérieure doit être cherchée.
+        [trailFound, trailIndex, trailTime, trailSerial] = pickTrail(recTrailTimes0, recTrailSerials0, recContexts0, curSorted, refreshLower, neighbourUpper, true, lastShownTime, lastShownSerial)
+        if trailFound and (refreshSourceKind < 0 or trailTime > refreshTime or (trailTime == refreshTime and (na(refreshSerial) or trailSerial > refreshSerial)))
+            refreshSourceKind := 3
+            refreshIndex := trailIndex
+            refreshTime := trailTime
+            refreshSerial := trailSerial
+bool refreshFound = refreshSourceKind >= 0
+[refreshRaw, refreshRawState, refreshWarmup, refreshContext, refreshClose, refreshReference] = candidateValues(refreshSourceKind, refreshIndex, tickPool, rawBuyerTicks, stateTicks, warmupTicks, engineTimeframeTicks, closeTicks, referenceTicks, trailRawTicks, trailStateTicks, trailWarmTicks, trailCloseTicks, trailReferenceTicks)
+// Reprise INVALIDÉE ([CY]) : candidat trouvé, ratio indéfini (voir le pont).
+bool refreshUndefined = refreshNeeded and refreshFound and na(refreshRaw)
+
+// ── TICKS ÉCARTÉS SUR UNE FRONTIÈRE PARTAGÉE (Diag 63) ──
+// Diagnostic seulement, calculé diagnostics affichés : bougie en cours et
+// réserve (tableau propre exclu) relues avec les bornes de contrôle
+// [prevOpen, exactUpper]. Ce qu'on y trouve de plus que la lecture stricte est
+// daté d'une milliseconde de frontière.
+// [DU] Script Diag seulement (Diag 63 n'est pas tracé dans le principal).
+bool looseScan = DIAG_FULL and showDiagnostics and hasPrevBar
+int looseSerial = na
+if looseScan
+    [loose0Found, loose0Index, loose0Time, loose0Serial] = lastInWindow(recTimes0, recSerials0, curSorted, prevOpen, exactUpper)
+    if loose0Found
+        looseSerial := loose0Serial
+    // Réserve, tableau propre exclu (source = bougie N) : on remonte depuis le
+    // dernier élément daté ≤ exactUpper tant qu'on reste dans [prevOpen, …] ;
+    // au plus 64 pas, diagnostic seulement.
+    int looseRank = poolLastAtOrBefore(tickPool, exactUpper)
+    int ownSource = bar_index - 1
+    int looseSteps = 0
+    while looseRank >= 0 and looseSteps < 64
+        Tick looseTick = array.get(tickPool, looseRank)
+        if looseTick.stamp < prevOpen
+            break
+        if looseTick.source != ownSource
+            if na(looseSerial) or looseTick.serial > looseSerial
+                looseSerial := looseTick.serial
+            break
+        looseRank -= 1
+        looseSteps += 1
+    // Traîne de la bougie en cours ([DE]), bornes de contrôle : un prédécesseur
+    // daté d'une milliseconde de frontière, écarté par la lecture stricte,
+    // compte ici comme un tick d'un tableau voisin.
+    [looseTrailFound, looseTrailIndex, looseTrailTime, looseTrailSerial] = pickTrail(recTrailTimes0, recTrailSerials0, recContexts0, curSorted, prevOpen, exactUpper, false, int(na), int(na))
+    if looseTrailFound and (na(looseSerial) or looseTrailSerial > looseSerial)
+        looseSerial := looseTrailSerial
+
+// ── COUVERTURE PAR NUMÉROS 1T ──
+// Deux trous mesurés sur le bloc DANS LES BORNES de N : trou INTÉRIEUR
+// (étendue des numéros − nombre d'éléments) et trou de TÊTE (entre le dernier
+// numéro compté pour la bougie précédente et le premier de ce bloc). Leur
+// somme = barres 1T produites par le contexte et absentes des blocs COMPTÉS —
+// pas « jamais livrées » : le script ne tient pas le journal des livraisons.
+// Un bloc vide, étranger ou non trié ne fait pas avancer la référence : son
+// trou réapparaît en tête du suivant. Bornes de contrôle (≤ exactUpper) : un
+// tick de la milliseconde partagée écarté de la lecture n'est pas compté
+// manquant. Rien ici n'alimente le rendu.
+// previousLastSerial, serialBlockUsable, blockFirstSerial et blockLastSerial
+// sont déclarés avant la lecture différée ([DF] : le plafond de compte de la
+// frontière partagée en a besoin) ; previousLastSerial est mis à jour plus bas.
+int inBoundsSpan = serialBlockUsable ? boundsLastIndex - firstInBoundsIndex + 1 : 0
+int interiorSerialGap = 0
+if serialBlockUsable and not na(blockFirstSerial) and not na(blockLastSerial)
+    interiorSerialGap := math.max(blockLastSerial - blockFirstSerial + 1 - inBoundsSpan, 0)
+int headSerialGap = 0
+if serialBlockUsable and not na(blockFirstSerial) and not na(previousLastSerial)
+    headSerialGap := math.max(blockFirstSerial - previousLastSerial - 1, 0)
+// RECOUVREMENT DE NUMÉROS ([CT]) : premier numéro compté pour N non postérieur
+// au dernier numéro compté pour la précédente — un élément compté pour N
+// appartient à une bougie déjà lue. Rattachement anormal (Diag 27, qualité 2),
+// hors du compte de cadence. Ne voit pas un retardataire livré dans le seul
+// tableau de N (résidu [CT]).
+bool serialOverlap = serialBlockUsable and not na(blockFirstSerial) and not na(previousLastSerial) and blockFirstSerial <= previousLastSerial
+int undeliveredSerials = interiorSerialGap + headSerialGap
+// Déficit par rapport à dix, sur les éléments dans les bornes ; un bloc vide,
+// étranger ou non trié compte dix.
+int blockShortfall = hasPrevBar and not wrongContext ? math.max(EXPECTED_TICKS - (serialBlockUsable ? inBoundsSpan : 0), 0) : 0
+
+// ── AMBIGUÏTÉ ──
+// Anomalies de RATTACHEMENT : tick hors bornes, dernier tick daté à
+// l'ouverture de la suivante, lecture ambiguë à l'ouverture, recouvrement de
+// numéros. Un bloc de plus de dix éléments dans les bornes n'en est pas une :
+// il se compte au Diag 48 (écart de compte non expliqué, qualité 2).
+bool overCount = hasIntrabar and attributedCount > EXPECTED_TICKS
+bool ambiguousAttribution = (hasIntrabar and outOfBoundsCount > 0) or boundaryShared or boundaryLower or serialOverlap or recByCount
+// Compte LISIBLE = aucune ambiguïté DÉTECTÉE par ces critères, pas une preuve
+// d'appartenance de chaque tick (résidu [CT]).
+// [DU] Clôture inconnue : l'exclusion porte sur les bornes de contrôle
+// (élément après ouverture de N+1 − 1), comme avant la lecture prolongée du
+// direct — un tick lu à l'ouverture de N+1 ne fait pas une bougie de 9.
+bool boundsTailSkipped = blockSorted and count1 > 0 and boundsLastIndex < count1 - 1
+bool cadenceUsable = hasIntrabar and not countedToNextOpen and not boundaryLower and not headUnattributable and not serialOverlap and (prevCloseKnown or not boundsTailSkipped)
+// Partielle : compte lisible inférieur à dix.
+bool partialBar = cadenceUsable and attributedCount < EXPECTED_TICKS
+
+// Sur une fin récupérée, les valeurs sont celles du tick retenu ailleurs.
+float rawRead = hasMeasure ? (fromNeighbour ? recRaw : readRaw) : na
+int stateRead = hasMeasure ? (fromNeighbour ? recState : readState) : 0
+// na, et non 0 %, sans donnée : une absence n'est pas un préchauffage à zéro.
+float warmupPercent = hasMeasure ? (fromNeighbour ? recWarmup : readWarmup) : na
+float referenceInTicksNow = hasMeasure ? (fromNeighbour ? recReference : readReference) : na
+bool engineWarmRead = not na(warmupPercent) and warmupPercent >= 100.0
+
+// ── GRANDEURS DÉDUITES ──
+float clampedRead = na(rawRead) ? na : clamp(rawRead, 0.0, 100.0)
+float buyerRead = na(clampedRead) or (hideUntilWarm and not engineWarmRead) ? na : clampedRead
+float spread = na(clampedRead) ? na : 2.0 * clampedRead - 100.0
+
+float exitThresholdChart = math.max(neutralExitSpread, neutralEnterSpread)
+float strongSpreadChart = math.min(100.0, math.max(MIN_STRONG_SPREAD, exitThresholdChart * VISUAL_RANGE_FACTOR))
+// strong = min(100, max(10, 3 × exit)), exit ∈ [0, 50] : l'écart n'est jamais nul.
+float strengthRangeChart = strongSpreadChart - exitThresholdChart
+float strengthRead = (
+    stateRead == 0 or na(spread) ?
+    0.0 :
+    clamp((math.abs(spread) - exitThresholdChart) / strengthRangeChart, 0.0, 1.0))
+
+// Le candidat de la reprise rafraîchie passe par les mêmes filtres qu'une
+// mesure : contexte 1T, écrêtage, préchauffage.
+float refreshClamped = refreshFound and not na(refreshContext) and refreshContext == 1 and not na(refreshRaw) ? clamp(refreshRaw, 0.0, 100.0) : na
+bool refreshWarm = not na(refreshWarmup) and refreshWarmup >= 100.0
+float refreshBuyer = na(refreshClamped) or (hideUntilWarm and not refreshWarm) ? na : refreshClamped
+float refreshSpread = na(refreshClamped) ? na : 2.0 * refreshClamped - 100.0
+float refreshStrength = (
+    refreshRawState == 0 or na(refreshSpread) ?
+    0.0 :
+    clamp((math.abs(refreshSpread) - exitThresholdChart) / strengthRangeChart, 0.0, 1.0))
+
+// Diag 63 : un tick plus récent que celui dont vient la valeur de N a-t-il été
+// écarté d'un tableau voisin sur une milliseconde de frontière ? Référence :
+// le tick de la mesure, sinon celui de la reprise rafraîchie, sinon celui de
+// la valeur reprise.
+int shownReferenceSerial = hasMeasure ? shownTickSerial : (not na(refreshBuyer) or refreshUndefined) ? refreshSerial : lastShownSerial
+bool boundarySetAside = hasPrevBar and not wrongContext and not na(looseSerial) and not na(shownReferenceSerial) and looseSerial > shownReferenceSerial
+
+// [DU] Lu par le seul script Diag.
+float firstTickOffsetMs = DIAG_FULL and count1 > 0 ? float(array.get(times1, 0) - prevOpen) : na
+
+// ============================================================================
+// PONT DES TROUS
+// ============================================================================
+
+// Le pont raisonne sur la VALEUR ; interdit hors contexte 1T et coupé à la
+// première bougie d'une séance.
+// [DU] valueMissingWithData : lu par le seul script Diag.
+bool valueMissingWithData = DIAG_FULL and hasMeasure and na(buyerRead)
+bool hasValue = hasMeasure and not na(buyerRead)
+// CALCUL INDÉFINI ([CX]) : un tick est lu, en contexte 1T, mais le moteur ne
+// rend pas de ratio (dénominateur du « Ratio des moyennes » nul après une
+// longue série de prix identiques ; HMA y est remplacée par WMA,
+// effectiveAverageType, [DU]). L'état du
+// moteur y est 0 : la valeur est reprise pour ne pas couper la courbe, mais
+// GRISE tout de suite, hors fenêtre, et la mémoire d'état passe au gris (la
+// couleur ne revient qu'avec une valeur définie). Diag 20 = 1 ; Diag 21 = 1
+// si la valeur est reprise, 0 si c'est la valeur propre de la bougie
+// (undefinedOwnValue, [DA]).
+// Quelle que soit la source du tick ([CY]) : tableau propre, bougie suivante,
+// réserve. Si la lecture propre est définie et qu'une fin
+// récupérée est indéfinie, la valeur reprise est celle de la lecture propre,
+// la dernière définie.
+bool undefinedMeasure = hasMeasure and na(rawRead)
+// Le repli n'est pris que si la lecture propre est elle-même plus récente que
+// le dernier tick tracé ([DC]) : jamais une valeur en arrière.
+float undefinedFallback = undefinedMeasure and fromNeighbour and hasRead and newerThanShown(readTickTime, readSerial, lastShownTime, lastShownSerial) ? definedValue(readRaw, readWarmup, hideUntilWarm) : na
+// VALEUR PROPRE D'UNE MESURE INDÉFINIE ([DA]) : quand ce repli existe, la
+// bougie trace SA valeur définie (grise), pas un report — y compris à la
+// première bougie d'une séance, où un report de la veille est interdit mais
+// où une valeur de la bougie elle-même ne l'est pas ; le bord fait de même
+// (curOwnFallback). Elle n'est pas une bougie pontée (Diag 21 = 0, Diag 20 =
+// 1).
+bool undefinedOwnValue = undefinedMeasure and not na(undefinedFallback)
+// REPRISE INVALIDÉE ([CY]) : bougie sans tick prouvé, dont le candidat de
+// reprise rafraîchie (plus récent que la valeur tracée) a un ratio indéfini.
+// Elle reste une reprise (valeur tracée conservée), passe au GRIS tout de
+// suite, remet la fenêtre à zéro et retient ce tick comme dernière
+// invalidation : aucun tick antérieur ne peut réactiver une couleur
+// (refreshUndefined, déclaré avec la reprise rafraîchie).
+
+bool bridgeBlocked = not hasPrevBar or wrongContext or finalBarOpensSession
+// [DT] Comme en v11.63 : la reprise ne dépend d'aucune case — la valeur est
+// toujours reprise ([BQ]) ; « Reprises strictes » ne joue que plus bas.
+bool bridgedBar = not hasValue and not undefinedOwnValue and not bridgeBlocked
+// Reprise rafraîchie : valeur d'un tick plus frais que la dernière tracée ;
+// reste une reprise, pas une mesure.
+bool refreshedBar = bridgedBar and not na(refreshBuyer)
+// Reprise SIMPLE : la valeur répète celle déjà tracée — le seul plateau réel,
+// le seul à perdre son remplissage quand il passe au gris.
+// ESTIMATION ([DD], option) : bougie sans tick prouvé ni candidat de reprise,
+// une valeur et un prix connus avant elle, son OHLC 10T disponible.
+// [DT] Calculée seulement si l'option est cochée (estimateStep est une
+// fonction pure : aucune série à entretenir).
+float estBuyer = na
+float estReference = na
+if estimateGaps and bridgedBar and not undefinedMeasure and not refreshedBar and not refreshUndefined and not na(close[1])
+    [estBuyerStep, estReferenceStep] = estimateStep(lastBuyer, lastShownPrice, lastShownReference, high[1], low[1], close[1], lengthInput, averageType, rangeCapMultiplier, rangeWeightedMode)
+    estBuyer := estBuyerStep
+    estReference := estReferenceStep
+// [DS] « not undefinedMeasure » : une mesure indéfinie sans repli est une
+// bougie pontée (valeur reprise, gris) mais pas une estimation.
+bool estimatedBar = estimateGaps and bridgedBar and not undefinedMeasure and not refreshedBar and not refreshUndefined and not na(estBuyer) and not na(close[1])
+float estClamped = estimatedBar ? clamp(estBuyer, 0.0, 100.0) : na
+float estSpread = na(estClamped) ? na : 2.0 * estClamped - 100.0
+int estState = estimatedBar and lastShownWarm ? nextSignalState(lastState, estSpread, neutralEnterSpread, exitThresholdChart) : 0
+float estStrength = estState == 0 or na(estSpread) ? 0.0 : clamp((math.abs(estSpread) - exitThresholdChart) / strengthRangeChart, 0.0, 1.0)
+bool simpleCarry = bridgedBar and not refreshedBar and not refreshUndefined and not estimatedBar
+// La fenêtre compte les bougies sans AUCUN tick du moteur ([CM]) : une mesure
+// (définie ou indéfinie, [DA]), une reprise rafraîchie ou une reprise
+// invalidée la remet à zéro ; les reprises simples qui suivent gardent état
+// et remplissage dix bougies au plus, puis gris.
+var int missingRun = 0
+missingRun := hasValue or undefinedMeasure or refreshedBar or refreshUndefined ? 0 : missingRun + 1
+bool bridgeWindow = missingRun <= BRIDGE_MAX_BARS
+// [DO] Estimation : la fenêtre compte aussi en secondes — âge du dernier vrai
+// tick du moteur, mesuré à la clôture de la bougie (exactUpper). 0 s : jamais.
+bool estimationHold = estimateHoldMs > 0 and not na(lastEngineTickTime) and exactUpper - lastEngineTickTime <= estimateHoldMs
+bool estimationWindow = bridgeWindow or estimationHold
+// La courbe ne se coupe jamais ([BQ]) : la valeur est toujours reprise, la
+// COULEUR porte l'information — gris immédiatement (case décochée) ou après
+// la fenêtre. Par défaut, seuls le préchauffage, une première bougie de
+// séance sans mesure et un contexte hors 1T coupent la courbe ; « Reprises
+// strictes » (option) la coupe aussi au-delà de dix bougies sans tick.
+// Une estimation garde sa couleur dans la fenêtre même case « Garder la
+// couleur » décochée : sa couleur est la sienne, pas un report.
+// [DT] « Reprises strictes » (option) : toute reprise grise tout de suite.
+bool greyBridge = bridgedBar and (strictBridges or (estimatedBar ? not estimationWindow : (not keepBridgeColor or not bridgeWindow)))
+// [DT] « Reprises strictes » : la valeur n'est reprise que dans la fenêtre
+// de dix bougies, puis la courbe se coupe (comportement v11.64).
+bool carryAllowed = not strictBridges or bridgeWindow
+
+// Mémoire de la dernière valeur tracée, avec le numéro et l'heure du tick dont
+// elle vient — ou du tick qui l'a invalidée ([CY]) — (ne jamais reculer ;
+// Diag 61). Effacée à la première bougie d'une séance et hors contexte 1T ;
+// mise à jour par une mesure, une reprise rafraîchie, un calcul indéfini ou
+// une reprise invalidée.
+if finalBarOpensSession or wrongContext
+    lastBuyer := na
+    lastState := 0
+    lastStrength := 0.0
+    lastShownSerial := na
+    lastShownTime := na
+    lastShownPrice := na
+    lastShownReference := na
+    lastEngineTickTime := na
+    lastShownWarm := false
+if hasValue
+    lastBuyer := buyerRead
+    lastState := stateRead
+    lastStrength := strengthRead
+    lastShownSerial := shownTickSerial
+    lastShownTime := shownTickTime
+    lastShownPrice := shownTickClose
+    lastShownReference := referenceInTicksNow
+    lastEngineTickTime := shownTickTime
+    lastShownWarm := engineWarmRead
+else if refreshedBar
+    lastBuyer := refreshBuyer
+    lastState := refreshRawState
+    lastStrength := refreshStrength
+    lastShownSerial := refreshSerial
+    lastShownTime := refreshTime
+    lastShownPrice := refreshClose
+    lastShownReference := refreshReference
+    lastEngineTickTime := refreshTime
+    lastShownWarm := refreshWarm
+else if undefinedMeasure
+    lastState := 0
+    lastStrength := 0.0
+    lastShownSerial := shownTickSerial
+    lastShownTime := shownTickTime
+    lastShownPrice := shownTickClose
+    lastShownReference := referenceInTicksNow
+    lastEngineTickTime := shownTickTime
+    lastShownWarm := engineWarmRead
+    if not na(undefinedFallback)
+        lastBuyer := undefinedFallback
+else if refreshUndefined
+    lastState := 0
+    lastStrength := 0.0
+    lastShownSerial := refreshSerial
+    lastShownTime := refreshTime
+    lastShownPrice := refreshClose
+    lastShownReference := refreshReference
+    lastEngineTickTime := refreshTime
+    lastShownWarm := refreshWarm
+else if estimatedBar
+    // L'estimation devient la base de la suivante ; datée de la clôture
+    // STRICTE de la bougie (neighbourUpper, [DH] — exactUpper jusqu'à la
+    // v11.48 : à une milliseconde partagée, les ticks de la suivante datés de
+    // cette milliseconde étaient jugés dépassés, Diag 20 = 3) : un tick de
+    // cette bougie retrouvé plus tard ne la remplace pas, un tick de la
+    // suivante daté après la frontière est plus récent.
+    lastBuyer := estClamped
+    lastState := estState
+    lastStrength := estStrength
+    // [DP] La garde « ne jamais reculer » ne recule pas : si la clôture
+    // stricte de la bougie n'est pas postérieure au dernier tick mémorisé
+    // (plusieurs bougies dans la même milliseconde, en rafale), l'heure et le
+    // numéro du dernier vrai tick sont conservés — sinon un tick déjà montré,
+    // daté de cette milliseconde, redevenait « plus récent » que l'estimation.
+    if na(lastShownTime) or neighbourUpper > lastShownTime
+        lastShownSerial := na
+        lastShownTime := neighbourUpper
+    lastShownPrice := close[1]
+    lastShownReference := estReference
+
+float buyerPercent = hasValue ? buyerRead : undefinedOwnValue ? undefinedFallback : bridgedBar and carryAllowed ? lastBuyer : na
+float sellerPercent = na(buyerPercent) ? na : 100.0 - buyerPercent
+int signalState = hasValue ? stateRead : bridgedBar ? lastState : 0
+float visualStrength = hasValue ? strengthRead : bridgedBar ? lastStrength : 0.0
+
+// Reprise sans mesure fraîche, calcul indéfini ou reprise invalidée : gris.
+if greyBridge or undefinedMeasure or refreshUndefined
+    signalState := 0
+    visualStrength := 0.0
+
+// Qualité : 3 = prix concordant, exactement dix ticks, numéros contigus, pas
+// de trou de tête, aucune ambiguïté, pas de fin récupérée — « aucune anomalie
+// détectée », jamais « prouvée » ; 2 = lue mais une condition manque ; 0 =
+// aucune mesure propre. En direct, la livraison perdant surtout des fins de
+// bougie, le Diag 34 lit souvent 2, puis 3 après rechargement.
+bool priceCompared = hasIntrabar and not na(shownTickClose) and not priceMismatch
+// [DU] Lue par le seul script Diag (Diag 34).
+int measureQuality = (
+    not DIAG_FULL or not hasValue ? 0 :
+    count1 <= SCAN_MAX and priceCompared and attributedCount == EXPECTED_TICKS and interiorSerialGap == 0 and headSerialGap == 0 and not ambiguousAttribution and not partialBar and not tailRecovered ? 3 :
+    2)
+
+// Une bougie pontée sans valeur précédente n'est pas une bougie tracée.
+bool bridgeEffective = bridgedBar and not na(buyerPercent)
+
+// ============================================================================
+// COMPTEURS — TOUS SUR LA BOUGIE N, À LA CONFIRMATION DE N+1
+// ============================================================================
+
+bool countNow = barstate.isconfirmed and hasPrevBar
+
+// Cadence (Diag 12, 32) : bougies au compte lisible.
+var float closedBarTickSum = 0.0
+var int closedBarCount = 0
+if countNow and cadenceUsable and not na(barTickCount)
+    closedBarTickSum := closedBarTickSum + barTickCount
+    closedBarCount := closedBarCount + 1
+
+var int partialBarCount = 0
+if countNow and partialBar
+    partialBarCount := partialBarCount + 1
+
+// [DU] Compteurs du seul script Diag : déclarés ici (même code dans les deux
+// fichiers), comptés si DIAG_FULL — dans le principal, rien ne les lit.
+var int oversizedBarCount = 0
+var int staleBarCount = 0
+var int ambiguousBarCount = 0
+// Écart de compte (Diag 48) : compté tel quel ; la qualité se lit au Diag 34.
+var int richBlockCount = 0
+var int emptyBarCount = 0
+var int unsortedBarCount = 0
+var int wrongContextBarCount = 0
+var int bridgedBarCount = 0
+// Bougies closes CALCULÉES en direct : utile pour comparer une lecture en
+// direct et la même bougie après rechargement.
+bool barWasRealtime = barstate.isrealtime
+var int realtimeBarCount = 0
+var int priceMismatchCount = 0
+var int boundarySharedCount = 0
+// Bougies récupérées (Diag 57).
+var int recoveredBarCount = 0
+// Reprises rafraîchies (Diag 60).
+var int refreshedBarCount = 0
+// Fins récupérées (Diag 62).
+var int tailBarCount = 0
+// Ticks écartés sur une frontière (Diag 63).
+var int boundarySetAsideCount = 0
+if countNow and DIAG_FULL
+    if oversizedBlock
+        oversizedBarCount := oversizedBarCount + 1
+    if staleData and not wrongContext
+        staleBarCount := staleBarCount + 1
+    if ambiguousAttribution
+        ambiguousBarCount := ambiguousBarCount + 1
+    if overCount
+        richBlockCount := richBlockCount + 1
+    if emptyBar
+        emptyBarCount := emptyBarCount + 1
+    if unsortedBlock
+        unsortedBarCount := unsortedBarCount + 1
+    if wrongContext
+        wrongContextBarCount := wrongContextBarCount + 1
+    if bridgeEffective
+        bridgedBarCount := bridgedBarCount + 1
+    if barWasRealtime[1] and not wrongContext
+        realtimeBarCount := realtimeBarCount + 1
+    if hasMeasure and priceMismatch
+        priceMismatchCount := priceMismatchCount + 1
+    if boundaryShared
+        boundarySharedCount := boundarySharedCount + 1
+    if recovered
+        recoveredBarCount := recoveredBarCount + 1
+    if (refreshedBar or refreshUndefined) and not na(buyerPercent)
+        refreshedBarCount := refreshedBarCount + 1
+    if tailRecovered
+        tailBarCount := tailBarCount + 1
+    if boundarySetAside
+        boundarySetAsideCount := boundarySetAsideCount + 1
+
+// ── MESURES DE FIDÉLITÉ DU BORD ([DG]) — script Diag seulement ([DU]) ──
+// Heure du tick que le bord a MONTRÉ à la dernière exécution de N (mesure
+// fraîche seulement ; na sinon). Var affectée en fin de script : à chaque
+// exécution de N+1, sa valeur est celle de l'exécution confirmée de N (retour
+// en arrière compris) — aucune mémoire intrabougie, pas de varip.
+var int lastEdgeShownTime = na
+// Diag 64 : le bord de N a montré un tick daté APRÈS la clôture de N — un
+// tick de N+1 arrivé en avance, passé sous le plafond de compte du tableau
+// propre (tête de N absente de son tableau). Le bord était en avance, prouvé
+// par l'heure ; la lecture différée l'écarte.
+bool edgeAheadOfClose = DIAG_FULL and hasPrevBar and prevCloseKnown and not na(lastEdgeShownTime) and lastEdgeShownTime > exactUpper
+var int edgeAheadCount = 0
+if countNow and edgeAheadOfClose
+    edgeAheadCount := edgeAheadCount + 1
+// Diag 47 ([DH]) : exécutions confirmées où l'heure de clôture de la bougie
+// (time_close) est déjà connue — comptées en fin de script. À l'historique,
+// toutes ; en direct, seulement quand time_close est déjà connu à cet
+// instant (en général na). Ces bougies-là versent dans la réserve à partir
+// du dernier élément daté avant leur clôture ([DK], v11.52), les autres tout
+// leur tableau. Jusqu'à la v11.48 : récupérations depuis la traîne du tableau
+// propre (Diag 58 = −7, source N) — 0 sur une journée entière, chemin prouvé
+// inutile au bord, compteur retiré.
+var int confirmedCloseKnownCount = 0
+// Diag 10 : taille du tableau figé de N (lu par [1]) contre la taille de son
+// tableau vivant à son exécution confirmée (var affectée en fin de script) —
+// l'hypothèse du versement unique ([DG]). 0 attendu.
+var int lastConfirmedCount = na
+bool frozenMismatch = DIAG_FULL and hasPrevBar and not na(lastConfirmedCount) and count1 != lastConfirmedCount
+var int frozenMismatchCount = 0
+if countNow and frozenMismatch
+    frozenMismatchCount := frozenMismatchCount + 1
+
+// Bougies sur lesquelles le script ne s'est jamais exécuté (Diag 59) : le
+// compteur avance une fois par indice de bougie. Script Diag seulement.
+var int executedBars = 0
+var int lastExecutedBar = na
+var int firstExecutedBar = na
+if DIAG_FULL
+    if na(firstExecutedBar)
+        firstExecutedBar := bar_index
+    if na(lastExecutedBar) or bar_index != lastExecutedBar
+        executedBars := executedBars + 1
+        lastExecutedBar := bar_index
+int skippedBars = DIAG_FULL ? bar_index - firstExecutedBar + 1 - executedBars : 0
+
+// Couverture cumulée sur toutes les bougies closes du bon contexte, blocs
+// vides compris (sommes : script Diag seulement ; previousLastSerial sert au
+// rendu — plafond de compte de la frontière partagée, garde de tête de la
+// lecture du direct ([DU]) — et au Diag 12/33).
+var int undeliveredSum = 0
+var int headGapSum = 0
+var int shortfallSum = 0
+// Sans décalage : un écart entre deux blocs peut venir de la queue du premier
+// comme de la tête du second, aucun décalage fixe n'aligne les deux compteurs.
+// (La borne des deux extrémités inconnues, Diag 47 jusqu'à la v11.47, n'est
+// plus tracée : au plus un bloc de chaque côté, dix numéros chacun.)
+if countNow and not wrongContext
+    if DIAG_FULL
+        undeliveredSum := undeliveredSum + undeliveredSerials
+        headGapSum := headGapSum + headSerialGap
+        shortfallSum := shortfallSum + blockShortfall
+    if serialBlockUsable and not na(blockLastSerial)
+        previousLastSerial := blockLastSerial
+if wrongContext
+    previousLastSerial := na
+// Résidu SIGNÉ et NON ATTRIBUABLE (Diag 45) : déficit réel du contexte 1T
+// (frontières de séance comprises) mêlé à ce que les deux extrémités de la
+// fenêtre ne peuvent pas montrer. Identité, à numéros uniques et croissants :
+// 10 × bougies comptées − étendue des numéros + somme des excédents au-delà
+// de dix par bloc. Jamais une accusation, jamais écrêté.
+int unattributedShortfall = shortfallSum - undeliveredSum
+
+// Toutes les bougies closes sans mesure propre, pontées ou non.
+var bool anyValueSeen = false
+if hasValue
+    anyValueSeen := true
+var int noMeasureBarCount = 0
+if countNow and not hasValue and anyValueSeen
+    noMeasureBarCount := noMeasureBarCount + 1
+
+float averageTicksPerBar = (
+    closedBarCount > 0 ?
+    closedBarTickSum / closedBarCount :
+    na)
+
+
+// ============================================================================
+// RENDU 10T — UNIQUEMENT VERT, ROUGE ET GRIS (rendu de la v10.10)
+// ============================================================================
+
+color stateColor = (
+    signalState == 1 ? buyerColor :
+    signalState == -1 ? sellerColor :
+    neutralColor)
+
+color buyerLineColor = (
+    colorBothLines ?
+    stateColor :
+    signalState == 1 ? buyerColor : neutralColor)
+
+color sellerLineColor = (
+    colorBothLines ?
+    stateColor :
+    signalState == -1 ? sellerColor : neutralColor)
+
+
+int weakTransparencySafe = math.max(weakTransparency, strongTransparency)
+
+// Opacité stable : force lissée puis ramenée à quelques paliers, changés avec
+// hystérésis ; remise à zéro sur le gris et sur une bougie sans valeur —
+// chaque zone colorée démarre au palier le plus léger.
+var float fillStrength = 0.0
+var float fillLevel = 0.0
+var int fillZoneState = 0
+float levelHalfStep = 0.5 / (OPACITY_LEVELS - 1)
+bool activeFill = signalState != 0 and not na(buyerPercent)
+if not activeFill or signalState != fillZoneState
+    fillStrength := 0.0
+    fillLevel := 0.0
+if activeFill
+    fillStrength := fillStrength + (visualStrength - fillStrength) * 2.0 / (OPACITY_SMOOTHING + 1)
+    if math.abs(fillStrength - fillLevel) > levelHalfStep + OPACITY_HYSTERESIS
+        fillLevel := math.round(fillStrength * (OPACITY_LEVELS - 1)) / float(OPACITY_LEVELS - 1)
+fillZoneState := activeFill ? signalState : 0
+
+int mostTransparent = math.min(weakTransparencySafe, activeFillCap)
+int mostOpaque = math.min(strongTransparency, mostTransparent)
+int dynamicTransparency = (
+    gradientOpacity ?
+    int(math.round(
+        mostTransparent -
+        fillLevel * (mostTransparent - mostOpaque))) :
+    strongTransparency)
+
+// Remplissage neutre : couleur grise exacte, transparence plafonnée.
+color neutralFillColor = color.new(neutralColor, math.min(neutralTransparency, neutralFillCap))
+
+// Remplissage actif : même garantie de luminance que le gris.
+int activeFillTransparency = math.min(dynamicTransparency, activeFillCap)
+color activeFillBase = stateColor
+
+// Remplissage ([BV], [CL]) : dans la fenêtre, une reprise porte l'état et le
+// remplissage de la dernière mesure, neutre compris. Forcée au gris, une
+// reprise rafraîchie garde un remplissage gris ; seule une reprise SIMPLE —
+// le plateau réel — n'en a pas (Diag 29 = 2).
+bool fillSuppressed = greyBridge and simpleCarry and not undefinedMeasure
+color fillColor = (
+    not showFill or fillSuppressed ? na :
+    signalState == 0 ? neutralFillColor :
+    color.new(activeFillBase, activeFillTransparency))
+
+hline(
+    50.0,
+    "Équilibre",
+    color = color.new(neutralColor, 55),
+    linestyle = hline.style_dotted)
+
+// Les deux courbes gardent tout (tracé, ligne d'état, fenêtre de données)
+// sauf leur chiffre sur l'échelle de prix, porté par les deux tracés
+// « chiffre sur l'échelle », après le bord vivant.
+buyerPlot = plot(
+    buyerPercent,
+    "BP 1T — acheteurs (%)",
+    color = buyerLineColor,
+    linewidth = 1,
+    style = plot.style_linebr,
+    offset = -1,
+    show_last = showLastInput,
+    display = perfCurvePlots ? display.all - display.price_scale : display.none)
+
+sellerPlot = plot(
+    sellerPercent,
+    "SP 1T — vendeurs (%)",
+    color = sellerLineColor,
+    linewidth = 1,
+    style = plot.style_linebr,
+    offset = -1,
+    show_last = showLastInput,
+    display = perfCurvePlots ? display.all - display.price_scale : display.none)
+
+fill(
+    buyerPlot,
+    sellerPlot,
+    color = fillColor,
+    show_last = showLastInput,
+    fillgaps = false,
+    display = perfCurvePlots ? display.all : display.none)
+
+
+// ============================================================================
+// BORD VIVANT — LA BOUGIE COURANTE, PROVISOIRE, EN LIGNES ET REMPLISSAGE
+// ============================================================================
+// Le tableau de la bougie COURANTE fait foi pour ses propres ticks (borne basse
+// l'ouverture, borne haute la clôture si elle est connue). Les autres sources
+// — la réserve — passent par le SÉLECTEUR COMMUN ([CX]),
+// datées strictement dans la bougie en cours, comme pour la lecture différée :
+// un tick de N déjà reçu ailleurs est montré au bord, pas seulement à la
+// lecture différée.
+// Sans clôture connue (le cas normal) : tableau propre sous le plafond de
+// compte « premier numéro reçu + 9 » ([DC]) ; la réserve sous « dernier
+// numéro connu avant l'ouverture + 10 » ([CY]). Diag 64 contrôle après coup
+// les avances prouvées par heure. OPTION [DT] « plafond prudent » : le
+// tableau propre prend aussi le plafond de la réserve, par minimum (v11.64) —
+// exclut l’avance due à une tête propre manquante sous l’hypothèse du compte ;
+// peut être en retard dès qu’une fin de bougie manque à la réserve.
+
+// [DU] Le bord n'est dessiné que sur la dernière bougie ; sur l'historique il
+// n'alimentait que le Diag 55 (non décalé, diagnostics affichés) et le Diag
+// 64 du script Diag. Hors de ces cas, ses dichotomies sont épargnées —
+// gain au (re)chargement seulement : en direct, barstate.islast est vrai à
+// chaque exécution.
+bool edgeNeeded = (barstate.islast and perfEdgeCompute) or showDiagnostics
+bool curCloseKnown = not na(time_close) and time_close >= time
+int curUpper = curCloseKnown ? time_close : na
+// La base de numéro ne sert que lorsque la clôture n'est pas connue.
+int edgeBaseRank = edgeNeeded and not curCloseKnown ? poolLastAtOrBefore(tickPool, time - 1) : -1
+int edgeBaseSerial = edgeBaseRank >= 0 ? array.get(tickPool, edgeBaseRank).serial : na
+// Sans clôture connue : plafond de numéro (−1 = aucun candidat si la réserve
+// ne connaît rien avant l'ouverture) ; clôture connue : l'heure suffit.
+int edgeSerialCap = not curCloseKnown ? (na(edgeBaseSerial) ? -1 : edgeBaseSerial + EXPECTED_TICKS) : na
+// Plafond du tableau propre : premier élément daté à l'ouverture ou après,
+// + 9. Numéros validés croissants (isSorted).
+int curScan = math.min(count0, SCAN_MAX)
+int curFirstIndex = edgeNeeded and not curCloseKnown and curSorted and count0 > 0 ? firstIndexAtOrAfter(timeTicks, time) : curScan
+int curOwnCap = curFirstIndex < curScan ? array.get(serialTicks, curFirstIndex) + EXPECTED_TICKS - 1 : na
+// Plafond prudent (option) : minimum des deux ; sans plafond propre, celui de
+// la réserve.
+int curSafeCap = na(curOwnCap) ? edgeSerialCap : math.min(curOwnCap, edgeSerialCap)
+int curCap = edgeCapPrudent ? curSafeCap : curOwnCap
+// Plafond prudent sans base antérieure exploitable : aucun candidat au bord
+// (Diag 55 = −2), plutôt qu'un premier numéro reçu supposé premier tick réel.
+bool curCapUnavailable = edgeCapPrudent and not curCloseKnown and edgeSerialCap < 0
+int curCandidate = not edgeNeeded or not curSorted ? -1 : curCloseKnown ? lastIndexAtOrBefore(timeTicks, time_close) : lastIndexAtOrBefore(serialTicks, curCap)
+int curCandidateTime = curCandidate >= 0 ? array.get(timeTicks, curCandidate) : na
+bool curOwnRead = curSorted and curCandidate >= 0 and curCandidateTime >= time
+int curOwnTime = curOwnRead ? curCandidateTime : na
+int curOwnSerial = curOwnRead ? array.get(serialTicks, curCandidate) : na
+int curOwnContext = curOwnRead ? array.get(engineTimeframeTicks, curCandidate) : na
+// Contexte courant explicitement invalide : une lecture propre a eu lieu, hors 1T.
+bool curWrongContext = curOwnRead and (na(curOwnContext) or curOwnContext != 1)
+// Autres sources : fenêtre stricte [curCertainLower, clôture], mêmes règles
+// que la lecture différée (jamais l'ouverture de N quand la clôture de N−1
+// n'est pas connue antérieure).
+bool curLowerClear = hasPrevBar and not na(time_close[1]) and time_close[1] < time
+int curCertainLower = curLowerClear ? time : time + 1
+int curOtherSource = -1
+int curOtherIndex = -1
+int curOtherTime = na
+int curOtherSerial = na
+// La réserve est triée par heure et numéro. Si même sa fin ne peut battre
+// la lecture propre, aucun élément sous les bornes ne peut la remplacer.
+// Aucun cache intrabar : la fin réelle est relue à chaque exécution.
+bool curPoolCanWin = edgeNeeded and array.size(tickPool) > 0
+if curPoolCanWin
+    Tick newestPoolTick = array.get(tickPool, array.size(tickPool) - 1)
+    curPoolCanWin := newestPoolTick.stamp >= curCertainLower and (not curOwnRead or newerThanShown(newestPoolTick.stamp, newestPoolTick.serial, curOwnTime, curOwnSerial))
+if curPoolCanWin
+    [curPickSource, curPickIndex, curPickTime, curPickSerial] = pickLatest(emptyInts, emptyInts, emptyInts, true, tickPool, curCertainLower, curUpper, false, int(na), int(na), edgeSerialCap)
+    curOtherSource := curPickSource
+    curOtherIndex := curPickIndex
+    curOtherTime := curPickTime
+    curOtherSerial := curPickSerial
+// Le plus récent gagne : la réserve à heure égale par le numéro.
+bool curOtherWins = curOtherSource >= 0 and (not curOwnRead or curOtherTime > curCandidateTime or (curOtherSource == 1 and curOtherTime == curCandidateTime and curOtherSerial > curOwnSerial))
+int curSourceKind = curOtherWins ? curOtherSource : curOwnRead ? 0 : -1
+int curIdx = curOtherWins ? curOtherIndex : curOwnRead ? curCandidate : -1
+int curChosenSerial = curOtherWins ? curOtherSerial : curOwnSerial
+bool curHasRead = curSourceKind >= 0
+if curOtherWins
+    curCandidateTime := curOtherTime
+[curRaw, curState, curWarmup, curContext, curPrice, curReference] = candidateValues(curSourceKind, curIdx, tickPool, rawBuyerTicks, stateTicks, warmupTicks, engineTimeframeTicks, closeTicks, referenceTicks, trailRawTicks, trailStateTicks, trailWarmTicks, trailCloseTicks, trailReferenceTicks)
+bool curContextOk = curHasRead and not na(curContext) and curContext == 1
+// Garde des mesures au bord ([CZ]) : le tick retenu doit être plus récent que
+// le dernier tick tracé ou invalidant (mémoire mise à jour par la lecture
+// différée de N−1 dans cette même exécution) ; sinon il est dépassé et le
+// bord fait une reprise (Diag 55 = 7).
+bool curStale = curHasRead and not newerThanShown(curCandidateTime, curChosenSerial, lastShownTime, lastShownSerial)
+float curClamped = na(curRaw) ? na : clamp(curRaw, 0.0, 100.0)
+bool curWarm = not na(curWarmup) and curWarmup >= 100.0
+float curBuyer = na(curClamped) or not curContextOk or curStale or (hideUntilWarm and not curWarm) ? na : curClamped
+int curSignal = na(curBuyer) ? 0 : curState
+// Calcul indéfini au bord ([CX]) : tick présent, contexte 1T, ratio na —
+// l'état du moteur y est 0 : valeur reprise, gris tout de suite. Si le tick
+// indéfini vient de la réserve et que la lecture
+// propre est définie, la valeur reprise est celle de la lecture propre — la
+// même règle que la lecture différée (undefinedFallback, [CZ]).
+bool curUndefined = curHasRead and curContextOk and not curStale and na(curRaw)
+bool curFallbackNeeded = curUndefined and curOtherWins and curOwnRead and newerThanShown(curOwnTime, curOwnSerial, lastShownTime, lastShownSerial)
+float curOwnRaw = curFallbackNeeded ? array.get(rawBuyerTicks, curCandidate) : na
+float curOwnWarm = curFallbackNeeded ? array.get(warmupTicks, curCandidate) : na
+float curOwnFallback = curFallbackNeeded ? definedValue(curOwnRaw, curOwnWarm, hideUntilWarm) : na
+
+// À la première bougie d'une séance, rien n'est repris tant qu'aucune valeur
+// courante n'est reçue. Le contexte de la bougie courante gouverne le bord ;
+// celui de la précédente ne conditionne que l'ancrage, par buyerPercent.
+bool edgeCarryAllowed = not session.isfirstbar and not curWrongContext
+bool edgeFresh = not na(curBuyer)
+// REPRISE RAFRAÎCHIE AU BORD ([CX]) : sans valeur courante, le tick du moteur
+// le plus frais déjà reçu, daté avant l'ouverture de la bougie en cours, dans
+// la séance, plus récent que la valeur tracée — bougie en cours
+// (retardataires), réserve : ce que la lecture différée fera pour cette
+// bougie. Même politique que la série : sa couleur avec
+// « Garder la couleur », sinon gris ; remplissage gris.
+int edgeRefreshLower = na(sessionStartTime) ? 0 : sessionStartTime
+int edgeRefreshSource = -1
+int edgeRefreshIndex = -1
+if edgeNeeded and edgeCarryAllowed and not edgeFresh and not curUndefined
+    // Borne haute curCertainLower − 1 ([DC]) : à une frontière basse non
+    // prouvée, un tick daté de l'ouverture n'est ni mesure ni reprise sans
+    // elle, alors que la lecture différée le prend en reprise.
+    [edgePickSource, edgePickIndex, edgePickTime, edgePickSerial] = pickLatest(timeTicks, serialTicks, engineTimeframeTicks, curSorted, tickPool, edgeRefreshLower, curCertainLower - 1, true, lastShownTime, lastShownSerial, int(na))
+    edgeRefreshSource := edgePickSource
+    edgeRefreshIndex := edgePickIndex
+[edgeRefreshRaw, edgeRefreshState, edgeRefreshWarm, edgeRefreshContext, edgeRefreshPrice, edgeRefreshReference] = candidateValues(edgeRefreshSource, edgeRefreshIndex, tickPool, rawBuyerTicks, stateTicks, warmupTicks, engineTimeframeTicks, closeTicks, referenceTicks, trailRawTicks, trailStateTicks, trailWarmTicks, trailCloseTicks, trailReferenceTicks)
+float edgeRefreshClamped = edgeRefreshSource >= 0 and not na(edgeRefreshRaw) ? clamp(edgeRefreshRaw, 0.0, 100.0) : na
+bool edgeRefreshWarmOk = not na(edgeRefreshWarm) and edgeRefreshWarm >= 100.0
+float edgeRefreshBuyer = na(edgeRefreshClamped) or (hideUntilWarm and not edgeRefreshWarmOk) ? na : edgeRefreshClamped
+bool edgeRefreshed = not na(edgeRefreshBuyer)
+// Reprise INVALIDÉE au bord ([CY]) : candidat trouvé, ratio indéfini — gris.
+bool edgeRefreshUndefined = edgeRefreshSource >= 0 and na(edgeRefreshRaw)
+// TYPE DE REPRISE PROPRE AU BORD ([CX]), avec la règle de remplissage de la
+// série : mesure fraîche ; calcul indéfini ou reprise invalidée (valeur
+// reprise, gris, remplissage gris) ; reprise rafraîchie (couleur du tick avec
+// « Garder la couleur », sinon gris, remplissage gris) ; reprise SIMPLE
+// (couleur dans la fenêtre, sinon gris SANS remplissage). missingRun décrit
+// la série SANS la bougie courante : la comparaison stricte l'y ajoute.
+bool edgeSimple = edgeCarryAllowed and not edgeFresh and not curUndefined and not edgeRefreshed and not edgeRefreshUndefined
+// ESTIMATION AU BORD ([DD], option) : même calcul que la série, avec l'OHLC de
+// la bougie en formation — à sa clôture, les mêmes entrées donnent la même
+// valeur que la lecture différée. [DT] Calculée seulement si l'option est
+// cochée.
+float edgeEstBuyer = na
+if estimateGaps and edgeNeeded and edgeSimple and (not strictBridges or missingRun < BRIDGE_MAX_BARS)
+    [edgeEstBuyerStep, edgeEstReferenceStep] = estimateStep(lastBuyer, lastShownPrice, lastShownReference, high, low, close, lengthInput, averageType, rangeCapMultiplier, rangeWeightedMode)
+    edgeEstBuyer := edgeEstBuyerStep
+// v11.65.1 : une estimation au bord respecte aussi la coupure stricte.
+// missingRun compte les bougies précédentes : >= 10 exclut la 11e courante.
+bool edgeEstimated = estimateGaps and edgeSimple and not na(edgeEstBuyer) and (not strictBridges or missingRun < BRIDGE_MAX_BARS)
+float edgeEstClamped = edgeEstimated ? clamp(edgeEstBuyer, 0.0, 100.0) : na
+float edgeEstSpread = na(edgeEstClamped) ? na : 2.0 * edgeEstClamped - 100.0
+int edgeEstState = edgeEstimated and lastShownWarm ? nextSignalState(lastState, edgeEstSpread, neutralEnterSpread, exitThresholdChart) : 0
+// Reprise SIMPLE colorée : « Garder la couleur » et fenêtre de dix bougies
+// (comparaison stricte : missingRun ne compte pas la bougie courante) ; jamais
+// en « Reprises strictes » ([DT]).
+bool edgeColoredCarry = edgeSimple and keepBridgeColor and not strictBridges and missingRun < BRIDGE_MAX_BARS
+// [DT] « Reprises strictes » : au bord aussi, la valeur n'est reprise que
+// dans la fenêtre ; sinon toujours (v11.63). [DU] Un tick à ratio indéfini
+// (calcul indéfini, reprise invalidée) remet la fenêtre à zéro dans la série
+// (missingRun := 0, carryAllowed) : au bord aussi, même après la coupure. La
+// valeur reprise est lastBuyer, comme dans la série — buyerPercent vaut na
+// après une coupure stricte (identiques hors de ce cas).
+bool edgeCarryValue = edgeCarryAllowed and (not strictBridges or missingRun < BRIDGE_MAX_BARS or curUndefined or edgeRefreshUndefined)
+float edgeBuyer = edgeFresh ? curBuyer : edgeRefreshed ? edgeRefreshBuyer : curUndefined and not na(curOwnFallback) ? curOwnFallback : edgeEstimated ? edgeEstClamped : (edgeCarryValue ? lastBuyer : na)
+// [DO] Estimation au bord : même règle en secondes que la série, âge mesuré à
+// l'ouverture de la bougie en cours (sa clôture n'est pas connue).
+bool edgeEstimationHold = estimateHoldMs > 0 and not na(lastEngineTickTime) and time - lastEngineTickTime <= estimateHoldMs
+// Reprise rafraîchie au bord : la couleur du tick avec « Garder la couleur »,
+// sinon gris ([CX]) ; grise en « Reprises strictes ».
+int edgeState = edgeFresh ? curSignal : edgeRefreshed ? (keepBridgeColor and not strictBridges ? edgeRefreshState : 0) : edgeEstimated ? ((not strictBridges and (missingRun < BRIDGE_MAX_BARS or edgeEstimationHold)) ? edgeEstState : 0) : edgeColoredCarry ? signalState : 0
+color edgeStateColor = edgeState == 1 ? buyerColor : edgeState == -1 ? sellerColor : neutralColor
+color edgeBuyerLineColor = colorBothLines ? edgeStateColor : edgeState == 1 ? buyerColor : neutralColor
+color edgeSellerLineColor = colorBothLines ? edgeStateColor : edgeState == -1 ? sellerColor : neutralColor
+// Même palier d'opacité que la bougie close si l'état continue ; sinon le
+// palier de départ d'une zone.
+int edgeNewZoneTransparency = gradientOpacity ? mostTransparent : mostOpaque
+int edgeTransparency = edgeState != 0 and edgeState == signalState ? activeFillTransparency : edgeNewZoneTransparency
+color edgeFillBase = edgeStateColor
+// Seule une reprise SIMPLE passée au gris n'a pas de remplissage ([CL]) —
+// décidé sur la bougie courante elle-même, plus sur la précédente ([CX]).
+bool edgeBareCarry = edgeSimple and not edgeEstimated and not edgeColoredCarry
+color edgeFillColor = not showFill or edgeBareCarry ? color.new(neutralColor, 100) : edgeState == 0 ? neutralFillColor : color.new(edgeFillBase, edgeTransparency)
+color hiddenColor = color.new(neutralColor, 100)
+
+// Égalité explicite, y compris si les deux couleurs valent na.
+edgeSameColor(color first, color second) =>
+    na(first) ? na(second) : not na(second) and first == second
+
+// Les entrées restent fixes pendant une exécution complète du script.
+// Calcul/dessin désactivé : aucun objet de bord à créer ou à masquer.
+bool edgeDrawNeeded = perfEdgeCompute and perfEdgeDraw
+var line edgeBuyerLine = edgeDrawNeeded ? line.new(bar_index, 50.0, bar_index, 50.0, xloc = xloc.bar_index, color = hiddenColor, width = 1) : na
+var line edgeSellerLine = edgeDrawNeeded ? line.new(bar_index, 50.0, bar_index, 50.0, xloc = xloc.bar_index, color = hiddenColor, width = 1) : na
+var linefill edgeFill = edgeDrawNeeded ? linefill.new(edgeBuyerLine, edgeSellerLine, hiddenColor) : na
+// Une mesure courante sans bougie close à laquelle se relier est dessinée par
+// un POINT sur chaque courbe (une ligne de longueur nulle ne s'affiche pas).
+var label edgeBuyerDot = edgeDrawNeeded ? label.new(bar_index, 50.0, "", xloc = xloc.bar_index, style = label.style_circle, color = hiddenColor, textcolor = hiddenColor, size = size.tiny) : na
+var label edgeSellerDot = edgeDrawNeeded ? label.new(bar_index, 50.0, "", xloc = xloc.bar_index, style = label.style_circle, color = hiddenColor, textcolor = hiddenColor, size = size.tiny) : na
+
+// IMPORTANT : var, jamais varip. Pine restaure ces couleurs ET les objets
+// au même état confirmé avant chaque nouvelle exécution de la bougie.
+// Une couleur changée en direct est donc bien réappliquée après rollback.
+var color edgeAppliedBuyerLineColor = hiddenColor
+var color edgeAppliedSellerLineColor = hiddenColor
+var color edgeAppliedFillColor = hiddenColor
+var color edgeAppliedBuyerDotColor = hiddenColor
+var color edgeAppliedSellerDotColor = hiddenColor
+// edgeVisible hors du bloc : le Diag 55 lit la visibilité réelle du bord.
+bool edgeVisible = perfEdgeCompute and hasPrevBar and not na(edgeBuyer) and not curWrongContext
+if barstate.islast and edgeDrawNeeded
+    bool startFromClosed = not na(buyerPercent)
+    bool edgeIsolated = edgeVisible and not startFromClosed
+    float startBuyer = startFromClosed ? buyerPercent : edgeBuyer
+    if edgeIsolated
+        label.set_xy(edgeBuyerDot, bar_index, edgeBuyer)
+        label.set_xy(edgeSellerDot, bar_index, 100.0 - edgeBuyer)
+    color wantedBuyerDotColor = edgeIsolated ? edgeBuyerLineColor : hiddenColor
+    color wantedSellerDotColor = edgeIsolated ? edgeSellerLineColor : hiddenColor
+    if not edgeSameColor(edgeAppliedBuyerDotColor, wantedBuyerDotColor)
+        label.set_color(edgeBuyerDot, wantedBuyerDotColor)
+        edgeAppliedBuyerDotColor := wantedBuyerDotColor
+    if not edgeSameColor(edgeAppliedSellerDotColor, wantedSellerDotColor)
+        label.set_color(edgeSellerDot, wantedSellerDotColor)
+        edgeAppliedSellerDotColor := wantedSellerDotColor
+    bool edgeConnected = edgeVisible and not edgeIsolated
+    if edgeConnected
+        line.set_xy1(edgeBuyerLine, bar_index - 1, startBuyer)
+        line.set_xy2(edgeBuyerLine, bar_index, edgeBuyer)
+        line.set_xy1(edgeSellerLine, bar_index - 1, 100.0 - startBuyer)
+        line.set_xy2(edgeSellerLine, bar_index, 100.0 - edgeBuyer)
+    color wantedBuyerLineColor = edgeConnected ? edgeBuyerLineColor : hiddenColor
+    color wantedSellerLineColor = edgeConnected ? edgeSellerLineColor : hiddenColor
+    color wantedFillColor = edgeConnected ? edgeFillColor : hiddenColor
+    if not edgeSameColor(edgeAppliedBuyerLineColor, wantedBuyerLineColor)
+        line.set_color(edgeBuyerLine, wantedBuyerLineColor)
+        edgeAppliedBuyerLineColor := wantedBuyerLineColor
+    if not edgeSameColor(edgeAppliedSellerLineColor, wantedSellerLineColor)
+        line.set_color(edgeSellerLine, wantedSellerLineColor)
+        edgeAppliedSellerLineColor := wantedSellerLineColor
+    if not edgeSameColor(edgeAppliedFillColor, wantedFillColor)
+        linefill.set_color(edgeFill, wantedFillColor)
+        edgeAppliedFillColor := wantedFillColor
+
+// ============================================================================
+// CHIFFRES SUR L'ÉCHELLE DE PRIX — LE BOUT DE LA COURBE
+// ============================================================================
+// Sur la dernière bougie, quand le bord est affiché, les deux chiffres
+// prennent sa valeur et son état ; sinon la valeur différée. Seule la dernière
+// valeur d'un tracé display.price_scale s'affiche. Couleurs : la courbe
+// dominante porte la couleur de l'état ; le CHIFFRE du camp opposé utilise
+// axisMinorColor (réglage réactivé). En état neutre, les deux chiffres gardent
+// neutralColor. Les couleurs des courbes et du remplissage restent indépendantes.
+bool axisFromEdge = barstate.islast and edgeVisible
+float axisBuyer = axisFromEdge ? edgeBuyer : buyerPercent
+float axisSeller = na(axisBuyer) ? na : 100.0 - axisBuyer
+int axisState = axisFromEdge ? edgeState : signalState
+color axisStateColor = (
+    axisState == 1 ? buyerColor :
+    axisState == -1 ? sellerColor :
+    neutralColor)
+
+color buyerAxisColor = (
+    colorBothLines ?
+    axisStateColor :
+    axisState == 1 ? buyerColor :
+    axisState == -1 ? axisMinorColor : neutralColor)
+
+color sellerAxisColor = (
+    colorBothLines ?
+    axisStateColor :
+    axisState == -1 ? sellerColor :
+    axisState == 1 ? axisMinorColor : neutralColor)
+
+// Ces deux tracés n'affichent QUE le chiffre sur l'échelle de prix.
+plot(
+    axisBuyer,
+    "BP 1T — chiffre sur l'échelle",
+    color = buyerAxisColor,
+    offset = -1,
+    show_last = showLastInput,
+    display = perfAxisPlots ? display.price_scale : display.none)
+
+plot(
+    axisSeller,
+    "SP 1T — chiffre sur l'échelle",
+    color = sellerAxisColor,
+    offset = -1,
+    show_last = showLastInput,
+    display = perfAxisPlots ? display.price_scale : display.none)
+
+// ============================================================================
+// DIAGNOSTICS — FENÊTRE DE DONNÉES UNIQUEMENT, DÉCALÉS D'UNE BOUGIE COMME LES
+// COURBES : ILS DÉCRIVENT LA BOUGIE SURVOLÉE (SAUF LE DIAG 55, NON DÉCALÉ :
+// LE BORD DE LA BOUGIE EN COURS)
+// ============================================================================
+
+color invisible = #00000000
+
+// [DT] DIAG-SECTION-BEGIN — script principal : sept diagnostics seulement.
+// Les 59 sont dans « BSP Diag v11.65 » (même moteur, cette section remplacée).
+// [DU] Diagnostics décochés : display.none (ternaire « input » sur chaque
+// tracé) — aucune ligne dans la fenêtre de données ; une valeur na y laissait
+// sept lignes vides aux titres d'un paragraphe.
+
+plot(showDiagnostics ? (hasIntrabar ? 1.0 : 0.0) : na,
+    "Diag 11 — tick lu dans le tableau de la bougie (0/1)",
+    color = invisible, format = format.price, precision = 0, offset = -1, display = showDiagnostics ? display.data_window : display.none)
+
+plot(showDiagnostics ? averageTicksPerBar : na,
+    "Diag 12 — ticks 1T comptés dans les bornes, par bougie close au compte lisible (moyenne ; effectif au Diag 32 du script « BSP Diag ») : aucune ambiguïté DÉTECTÉE par les critères de cadence — ni compte atteignant l'ouverture de la suivante, ni lecture datée de l'ouverture ou retardataires d'avant l'ouverture sans clôture précédente connue antérieure, ni numéro déjà compté pour la précédente (v11.34) ; clôture inconnue (Diag 25 = 0, script « BSP Diag ») : tout élément daté de l'ouverture suivante ou après exclut. Un excédent après la clôture n'exclut plus la bougie (v11.33). Ce n'est pas une preuve d'appartenance : un retardataire daté de l'ouverture partagée, livré dans ce seul tableau, peut compléter un compte de dix. Au-dessus de 10,00 : écart de compte non expliqué entre le flux 1T et le graphique (voir Diag 48, script « BSP Diag »)",
+    color = invisible, format = format.price, precision = 2, offset = -1, display = showDiagnostics ? display.data_window : display.none)
+
+plot(showDiagnostics ? float(noMeasureBarCount) : na,
+    "Diag 30 — bougies closes sans valeur mesurée (trous, calculs indéfinis, ticks dépassés ; pontées ou non)",
+    color = invisible, format = format.price, precision = 0, offset = -1, display = showDiagnostics ? display.data_window : display.none)
+
+plot(showDiagnostics ? float(partialBarCount) : na,
+    "Diag 33 — bougies closes partielles : moins de dix ticks comptés dans les bornes, sur les bougies au compte lisible du Diag 32 (script « BSP Diag » ; v11.33 : un excédent après la clôture n'exclut plus)",
+    color = invisible, format = format.price, precision = 0, offset = -1, display = showDiagnostics ? display.data_window : display.none)
+
+plot(showDiagnostics ? (curCapUnavailable ? -2.0 : not curSorted and not edgeFresh ? -3.0 : edgeVisible ? (edgeFresh ? (curSourceKind == 1 ? 4.0 : 1.0) : edgeRefreshed ? 2.0 : curUndefined ? 3.0 : edgeRefreshUndefined ? 6.0 : edgeEstimated ? 8.0 : curStale ? 7.0 : 0.0) : -1.0) : na,
+    "Diag 55 — bord vivant : -2 (option « plafond prudent ») aucune base de numéro antérieure pour borner le bord, -3 bloc courant invalide ; 1 mesure fraîche de son PROPRE tableau, 4 mesure fraîche prise dans la RÉSERVE (v11.40 : sous le plafond de compte si la clôture est inconnue ; v11.47 : prédécesseurs transportés compris), (5, lecture de secours, retiré en v11.48), 2 reprise RAFRAÎCHIE au bord (v11.39), 3 calcul indéfini (valeur reprise, gris, v11.39 ; valeur de la lecture propre si elle est définie, v11.41), 6 reprise INVALIDÉE (valeur reprise, gris, v11.40), 7 tick DÉPASSÉ (pas plus récent que le dernier tracé ou invalidant : reprise, v11.41 ; depuis la v11.57, 8 l'emporte si une estimation est affichée), 8 ESTIMATION depuis l'OHLC de la bougie en formation (option v11.45), 0 reprise simple affichée (rien à comparer), -1 rien d'affiché au bord (début de séance, démarrage, préchauffage, hors 1T, courbe coupée par « Reprises strictes »), NON décalé",
+    color = invisible, format = format.price, precision = 0, display = showDiagnostics ? display.data_window : display.none)
+
+plot(showDiagnostics and hasPrevBar ? (fromNeighbour ? (recByCount ? -6.0 : recFromTrail ? -5.0 : recFromPoolTrail ? -7.0 : recOffset == 0 ? 1.0 : recOffset == 1 ? -8.0 : float(recOffset)) : hasMeasure ? 0.0 : estimatedBar and not na(buyerPercent) ? -4.0 : -1.0) : na,
+    "Diag 58 — source du tick affiché pour cette bougie : 0 son propre tableau, 1 le tableau de la bougie SUIVANTE (livré en retard), -5 la TRAÎNE du tableau de la bougie suivante (v11.46 : le prédécesseur transporté par un de ses premiers éléments — fin de bougie perdue par la livraison, retrouvée au tick livré suivant), -7 un prédécesseur transporté versé dans la RÉSERVE depuis un tableau figé (v11.47 : le sien ou un autre), -6 tick daté de la milliseconde de frontière attribué par NUMÉRO (option v11.47, qualité 2), k ≥ 2 le tableau de la bougie k−1 rangs AVANT elle (flux en avance ; sans limite depuis la v11.35, 4 rangs au plus jusqu'à la v11.34), -8 élément LIVRÉ de son propre tableau relu depuis la réserve (v11.66 : inatteignable par construction — tableau figé différent du tableau versé, Diag 10 du script « BSP Diag » — jusqu'ici affiché 1), -1 aucune mesure ni estimation affichée (valeur éventuellement reprise, ou courbe coupée ; traîne comprise) ; -2 et -3 (lecture de secours, v11.36 à v11.47) n'existent plus, -4 ESTIMATION depuis la clôture 10T (option v11.45 : pas une mesure). Le Diag 11 vaut 0 sur une bougie récupérée, 1 sur une fin récupérée (Diag 62, script « BSP Diag »)",
+    color = invisible, format = format.price, precision = 0, offset = -1, display = showDiagnostics ? display.data_window : display.none)
+
+plot(showDiagnostics and hasPrevBar and not na(buyerPercent) and not na(lastShownTime) ? float(math.max(exactUpper - lastShownTime, 0)) : na,
+    "Diag 61 — âge de la valeur tracée pour cette bougie (ms) : sa clôture moins l'heure du tick dont vient la valeur — ou du tick qui l'a invalidée (calcul indéfini, reprise invalidée, v11.40). Près de 0 : mesure sur son dernier tick ; plus grand : ticks de fin manquants (avant la v11.46 : toute fin perdue ; depuis : fin perdue dont le prédécesseur transporté n'est pas admissible, ou n'est arrivé ni pendant N+1 ni dans le tableau de N lui-même), reprise rafraîchie ou reprise simple ; Sur une estimation (option), cet âge est synthétique : la valeur est datée de la borne stricte neighbourUpper (1 ms en frontière partagée), ou la date déjà mémorisée est conservée si cette borne ne progresse pas. Il ne mesure pas la fraîcheur d’un tick réel. En direct, clôture inconnue, un tick lu à l'ouverture de la suivante (milliseconde partagée, v11.66) donne 0",
+    color = invisible, format = format.price, precision = 0, offset = -1, display = showDiagnostics ? display.data_window : display.none)
+
+// [DT] DIAG-SECTION-END
+// ============================================================================
+// FIN DE SCRIPT — VERSEMENT DANS LA RÉSERVE ET MÉMOIRES DU BORD ([DG])
+// ============================================================================
+// Après toutes les lectures de cette exécution. À l'exécution CONFIRMÉE de la
+// bougie, son tableau vivant — celui que [1] rendra à la suivante — est versé
+// une fois dans la réserve (éléments et prédécesseurs, source = cette
+// bougie) ; les exécutions non confirmées ne versent rien (leur travail
+// serait défait au retour en arrière). Un tableau non trié n'est pas versé
+// (Diag 49). Les mémoires ci-dessous sont lues par la bougie suivante. Le
+// Diag 47 ([DH]) compte ici les exécutions confirmées à clôture connue.
+if barstate.isconfirmed
+    if DIAG_FULL and curCloseKnown
+        confirmedCloseKnownCount := confirmedCloseKnownCount + 1
+    if count0 > 0 and curSorted
+        // [DK] Clôture connue (historique ; en direct time_close est na ici,
+        // Diag 47) : versement à partir du DERNIER élément daté avant la
+        // clôture — celui que lisent la lecture différée et le bord quand la
+        // clôture partage sa milliseconde avec l'ouverture suivante ou que la
+        // fin est perdue (base du plafond de compte du bord) — puis
+        // la clôture et la queue ; les ticks propres qui le précèdent ne sont
+        // jamais servis par la réserve (la lecture différée lit le tableau
+        // figé, un candidat de la réserve doit porter un numéro supérieur au
+        // tick lu, les fenêtres du bord et de la reprise commencent à
+        // l'ouverture ou après le tick tracé). Modèle joint, partie 5 :
+        // 40 000 bougies, lecture différée, reprise et bord identiques.
+        // Clôture inconnue : tout le tableau, comme avant.
+        int absorbFrom = curCloseKnown ? math.max(firstIndexAtOrAfter(timeTicks, time_close) - 1, 0) : 0
+        [absorbedPool, absorbedDeliveredFrom] = poolAbsorb(tickPool, timeTicks, serialTicks, rawBuyerTicks, stateTicks, warmupTicks, engineTimeframeTicks, closeTicks, referenceTicks, trailTimeTicks, trailSerialTicks, trailRawTicks, trailStateTicks, trailWarmTicks, trailCloseTicks, trailReferenceTicks, bar_index, absorbFrom, poolDeliveredFrom)
+        tickPool := absorbedPool
+        poolDeliveredFrom := absorbedDeliveredFrom
+    lastConfirmedCount := DIAG_FULL ? count0 : int(na)
+    // [DU] Tri mémorisé pour la lecture différée de cette bougie (blockSorted).
+    // curTimesSorted et non curSorted : blockAligned ne vérifie pas la traîne.
+    sortedMemoBar := bar_index
+    sortedMemoCount := count0
+    sortedMemoValue := curTimesSorted
+lastEdgeShownTime := DIAG_FULL and edgeFresh ? curCandidateTime : na
