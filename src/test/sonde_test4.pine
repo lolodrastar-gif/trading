@@ -1,0 +1,32 @@
+//@version=6
+// Sonde d'une minute pour BSP test3 / test4. À ajouter au graphique 10T
+// pendant le marché, à regarder une minute, puis à retirer.
+// L'étiquette au-dessus de la dernière bougie affiche trois contrôles :
+//   1. Recherches natives : doit dire OK.
+//   2. Couleurs avec transparence : doit dire OK.
+//   3. Retour en arrière d'une couleur de dessin en direct : à chaque tick, le
+//      texte annonce la couleur attendue de l'étiquette (ROUGE ou BLEUE). La
+//      couleur réelle doit TOUJOURS correspondre au texte. Si l'étiquette reste
+//      rouge alors que le texte dit BLEUE, la mémoire de couleur du test4 n'est
+//      pas sûre sur ce graphique.
+indicator("Sonde test4", overlay = true)
+
+a = array.from(10, 20, 20, 20, 30, 40)
+b = array.from(5, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 9)
+bool okSearch = array.binary_search_leftmost(a, 15) == 0 and array.binary_search_leftmost(a, 20) == 1 and array.binary_search_leftmost(a, 25) == 3 and array.binary_search_rightmost(a, 15) == 1 and array.binary_search_rightmost(a, 20) == 3 and array.binary_search_rightmost(a, 25) == 4 and array.binary_search_leftmost(b, 7) == 1 and array.binary_search_rightmost(b, 7) == 10
+
+bool okColor = color.new(#8A8A9A, 0) != color.new(#8A8A9A, 100)
+
+var label probe = label.new(bar_index, high, "", style = label.style_label_down, color = color.blue, textcolor = color.white)
+varip int ticks = 0
+if barstate.isrealtime
+    ticks += 1
+bool wantRed = barstate.isrealtime and not barstate.isconfirmed and ticks % 2 == 1
+
+if barstate.islast
+    label.set_xy(probe, bar_index, high)
+    string head = "Recherches natives : " + (okSearch ? "OK" : "ÉCART") + "\nCouleurs avec transparence : " + (okColor ? "OK" : "ÉCART")
+    string tail = barstate.isrealtime ? "\nTick " + str.tostring(ticks) + " : étiquette attendue " + (wantRed ? "ROUGE" : "BLEUE") : "\nAttendre les ticks en direct"
+    label.set_text(probe, head + tail)
+    if wantRed
+        label.set_color(probe, color.red)
