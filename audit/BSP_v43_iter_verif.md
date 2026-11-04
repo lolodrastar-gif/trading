@@ -66,11 +66,14 @@ Le bord vivant suit les mêmes règles (l. 2300-2400).
 - **v4.3 (TRAIL64, V4)** : elles ne font qu'ajouter des candidats de reprise, jamais
   plus anciens que ceux de la v11.66 (`audit/BSP_v43_audit_verif.md`), et seulement
   quand le tableau vivant dépasse 16 ou 2 000 éléments, c'est-à-dire en rafale. Un
-  candidat de plus donne une reprise RAFRAÎCHIE : couleur du tick, fenêtre des dix
-  bougies remise à zéro (l. 1797), donc MOINS de gris de chemin 2. Le seul cas où un
-  candidat de plus donne du gris est le chemin 4, qui exige un ratio na, donc le
-  chemin 3 : préchauffage ou milliers de ticks sans amplitude, pas une ouverture
-  américaine.
+  candidat de plus donne en général une reprise RAFRAÎCHIE : couleur du tick, fenêtre
+  des dix bougies remise à zéro (l. 1797), donc MOINS de gris de chemin 2. La
+  relecture adverse (§ 5) a trouvé trois façons, rares, d'en AJOUTER : un tick plus
+  récent dont l'état du moteur est réellement 0 (lecture plus fidèle, impossible dans
+  une zone pleine à 55 %), une fenêtre de dix bougies qui se ferme une bougie plus tôt
+  dans un cas de milliseconde partagée en direct, et le chemin 4, qui exige un ratio
+  na (préchauffage ou 4 000 ticks de suite sans amplitude). Mesuré sur un million de
+  bougies de rafale simulées : 3 bougies grises ajoutées, 4 retirées.
 - **test4, anneau** : vérifiées identiques (`audit/BSP_test4_verif.md`,
   `audit/BSP_test4_anneau_verif.md`).
 
@@ -96,9 +99,39 @@ tick dont elle vient) :
 Comparer aussi la même bougie sur la v11.66 : si elle est grise au même endroit,
 ni l'ITER ni la v4.3 n'y sont pour rien.
 
-## 5. Relecture indépendante
+## 5. Relecture indépendante (03-04/11)
 
-(à compléter)
+Trois relectures en parallèle, puis une contre-relecture adverse (une seule des six a
+pu tourner, la limite d'utilisation ayant coupé les autres ; c'était celle du point
+qui comptait).
+
+- **Chemins du gris** : les quatre chemins du § 2 sont confirmés, avec leurs
+  signatures (le gris de reprise simple n'a pas de remplissage ; le gris neutre a un
+  remplissage plus opaque que les couleurs, 60 contre 70-78 de transparence, ce qui
+  le fait ressortir). Détail notable : avec « Colorer les deux courbes ensemble »
+  décochée, la courbe du camp opposé est TOUJOURS grise, par construction. La section
+  pont-rendu ne diffère de la v11.66 que par la condition de l'estimation (inerte,
+  option décochée) et le bloc d'audit inerte. Le sélecteur de reprise rafraîchie
+  réécrit en test4 : 200 000 cas, 0 écart avec la v11.66 à 16 porteurs.
+- **Modèle des récupérations en rafale** (1,2 million de bougies 10T simulées,
+  livraisons en retard de 27 à 164 bougies, blocs de 2 300 ticks, millisecondes
+  partagées) : même nombre de bougies grises avec et sans TRAIL64/V4, à quelques
+  unités près par 200 000, dans les deux sens. Les bandes grises fines dans une zone
+  pleine sont des reprises simples au-delà de dix bougies, identiques dans toutes les
+  versions (31 749 sur 84 289 bougies grises du modèle, 355 bandes de 1 à 5 bougies
+  et 526 de 6 à 20 à l'intérieur d'une zone colorée, octet pour octet les mêmes). Le
+  bord vivant n'utilise que `pickLatest` : TRAIL64 et V4 ne le touchent pas.
+- **Contre-relecture** : la relecture avait écrit que TRAIL64/V4 ne pouvaient ajouter
+  du gris QUE par un ratio na. Faux : les deux autres mécanismes du § 3 existent, 3
+  bougies ajoutées et 4 retirées sur un million, chaque ajout étant une lecture plus
+  fidèle. Aucun des trois ne peut produire les bandes de la capture.
+- **Itérateur** : syntaxe et portée conformes au manuel (`language/loops.md`), aucune
+  comparaison avec na sur un préfixe trié, aucune lecture au-delà du rang `size − 1`,
+  valeur de retour inchangée ; deux graines supplémentaires (40 000 cas) et un fuzz à
+  trois voies boucle simple / tri8 / itérateur (40 000 cas) : 0 écart. Précision : le
+  prédécesseur direct de l'itérateur est la boucle « tri8 » de la v4.3, elle-même
+  identique à la boucle simple de l'anneau. Hors des trois zones, le fichier est
+  identique à la v4.3.
 
 ## 6. Ce qu'on peut faire pour les pics de volatilité
 

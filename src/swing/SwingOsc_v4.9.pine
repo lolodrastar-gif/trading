@@ -1,0 +1,531 @@
+//@version=5
+// This source code is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+// © AstrideUnicorn — original « Swing Oscillator »
+//
+// Version v4.9 = la v4.8, PLUS L'OUBLI DES BOUGIES D'AVANT LA PAUSE
+// (15e réglage, coché par défaut). Rien d'autre ne change.
+//
+// LE CONSTAT. Avec la v4.8, il restait environ 10 % de mauvaises couleurs
+// dans les 40 bougies qui suivent une réouverture (simulation), dont les
+// deux tiers au démarrage : la moyenne de l'oscillateur garde la mémoire
+// de la fin de vendredi (ou de la veille), qui n'a souvent rien à voir
+// avec la reprise.
+//
+// LA CORRECTION. Après une pause d'au moins 30 minutes, les bougies
+// d'avant la pause comptent comme des corps nuls : l'oscillateur repart
+// du neutre et ne suit que la reprise.
+//   EMA et RMA : même formule que TradingView, repartie de zéro à la
+//   première bougie de la reprise ; au bout de 20 × période bougies, elle
+//   est identique à la moyenne habituelle (écart sous la précision du
+//   calcul), qui reprend alors la main.
+//   SMA et WMA : fenêtre où les corps d'avant la pause valent zéro, tant
+//   que la fenêtre contient la pause (période − 1 bougies) ; ensuite la
+//   fenêtre ne contient plus que la reprise, et c'est exactement la
+//   moyenne habituelle.
+//   HMA : non concernée.
+// Le canal (moyenne de |oscillateur|) n'est pas remis à zéro.
+//
+// JUGÉ SUR LA VRAIE TENDANCE (simulation, 300 réouvertures par cas,
+// 40 bougies après chacune, EMA 34 / WMA 38) :
+//   reprise sans lien avec vendredi ni le saut : 9,5 → 3,7 % / 9,5 → 3,4 %
+//   le marché comble le saut :                  10,0 → 3,7 % / 10,0 → 3,5 %
+//   le marché continue dans le sens du saut :   10,8 → 4,3 % / 10,5 → 4,2 %
+//   lundi continue la fin de vendredi :          1,5 → 2,7 % / 1,6 → 2,6 %
+//   — dans ce dernier cas, garder la mémoire de vendredi faisait mieux.
+// Sans pause de 30 minutes : identique au bit près (vérifié sur 3 000
+// bougies, EMA, WMA, SMA et RMA). Décocher le réglage redonne la v4.8 à
+// l'identique. Nouveau diagnostic dans la fenêtre de données : « oubli
+// d'avant la pause actif ».
+//
+// Version v4.8 = la v4.7, PLUS UNE CORRECTION DE LA RÉOUVERTURE EN
+// HEIKIN ASHI (14e réglage, coché par défaut). Rien d'autre ne change.
+//
+// LE CONSTAT (réouverture du lundi 28/09, 00:00). En Heikin Ashi,
+// l'ouverture d'une bougie est le milieu de la bougie précédente. Après
+// la pause, la première bougie part donc du prix de VENDREDI, et le saut
+// du week-end entre dans les corps des bougies suivantes : −saut,
+// −saut/2, −saut/4… soit deux fois le saut au total. Lundi : saut d'une
+// trentaine de points vers le bas, creux de −4,2 (EMA 34) et −4,0
+// (WMA 38) en deux secondes, alors que le prix remontait de 30 868 à
+// 30 921. Reconstitué hors TradingView : −0,9 sur des bougies normales,
+// −4,4 en Heikin Ashi — c'est le Heikin Ashi qui l'explique.
+//
+// LA CORRECTION. Après une pause d'au moins 30 minutes entre deux
+// bougies (week-end, pause quotidienne ; jamais en séance), la chaîne des
+// ouvertures Heikin Ashi repart de la première bougie de la reprise : son
+// corps vaut zéro, puis chaque ouverture est le milieu de la bougie
+// précédente, comme le fait TradingView, mais sans le prix d'avant la
+// pause. Au bout de 20 bougies, l'ouverture du graphique est reprise
+// telle quelle : l'écart restant vaut saut / 2^20, soit rien.
+// Reconstitution de lundi : creux de −1,4 au lieu de −4,4, retour
+// au-dessus de zéro à 7 s au lieu de 11 s ; pendant la baisse qui suit,
+// rien ne change (−3,8 contre −3,9) : le lissage Heikin Ashi est gardé.
+// JUGÉ SUR LA VRAIE TENDANCE (1 800 réouvertures simulées, 40 bougies
+// après chacune, EMA 34 ; WMA 38 pareil) : quand la tendance d'après la
+// reprise ne dépend pas du saut, mauvaise couleur 21,5 % → 8,0 % ; quand
+// le marché comble le saut (comme lundi), 42,3 % → 7,8 % ; quand il
+// continue dans le sens du saut, 3,1 % → 6,5 % — là, la v4.7 faisait
+// mieux. La v4.7 pariait que le marché continue dans le sens du saut ; la
+// v4.8 ne parie pas.
+// APRÈS ces 20 bougies, les corps redeviennent exactement ceux de la
+// v4.7. L'oscillateur, qui en fait la moyenne, la rejoint à 0,001 près en
+// 45 bougies (WMA 38) à 135 bougies (EMA 34). Le canal, moyenne sur 380 ou
+// 340 bougies, garde plus longtemps la trace du faux creux de la v4.7 :
+// pendant 300 à 900 bougies, environ 2,5 % des couleurs diffèrent —
+// pleine contre demi-force, ou neutre contre couleur, jamais des sens
+// opposés. Sans pause, et toujours sur des bougies normales (où le saut
+// ne tombe dans aucun corps) : identique au bit près (vérifié sur 5 000
+// bougies). Décocher le réglage redonne la v4.7 à l'identique.
+// Nouveau diagnostic dans la fenêtre de données : « correction de
+// réouverture active » (1 pendant les 20 bougies corrigées).
+//
+// Version v4.7 = la v4.5, PLUS HUIT RÉGLAGES D'APPARENCE. Le moteur est
+// toujours celui de ta v4.2, au caractère près : aucune formule touchée.
+//
+// LES CINQ COULEURS DE COURBE SONT EXACTEMENT LES CINQ CASES
+// « Couleur 0 » À « Couleur 4 » DE TON ONGLET STYLE, mais nommées et
+// rangées dans l'ordre où tu les vois à l'écran : hausse pleine, hausse
+// demi-force, neutre, baisse demi-force, baisse pleine. Style te les
+// donnait sans étiquette, dans un ordre que tu devais deviner en
+// tâtonnant ; elles sont maintenant dans « Paramètres en Entrée »,
+// groupe « Couleurs ».
+//
+// PAS DE DÉRIVATION, DONC PAS DE PIÈGE. Ma v4.6 fabriquait les deux
+// demi-forces à partir des deux pleines via un curseur de transparence.
+// C'était un défaut de MA fabrication : dès que tu mettais plus de 55 %
+// de transparence sur une couleur pleine, la demi-force devenait plus
+// franche qu'elle et l'échelle s'inversait. Les cinq couleurs sont
+// maintenant indépendantes, le cas ne peut plus se produire.
+//
+// SI TU AS DÉJÀ COLLÉ LA v4.6, RELIS TES COULEURS APRÈS CE COLLAGE.
+// Les positions 6 et suivantes ont changé d'ordre : ce qui était ta
+// couleur de baisse en position 7 y trouverait une demi-hausse. Tes
+// cinq premiers réglages — Période, Type de moyenne, Multiplicateur,
+// Niveaux ±0,5, Ligne zéro — sont intacts dans tous les cas, ils n'ont
+// jamais bougé de position depuis ta v4.2.
+//
+// CONSÉQUENCE NORMALE : les cases « Couleur 0 » à « Couleur 4 » de
+// l'onglet Style vont disparaître, ou se réduire à une seule. Il n'y a
+// plus de constantes à énumérer, elles ont déménagé dans les réglages.
+//
+// LE PRIX À PAYER, ET JE L'ASSUME : treize entrées au lieu de cinq. Je
+// te répète depuis des semaines qu'il faut moins de boutons, pas plus.
+// Ici tu as demandé deux fois à pouvoir changer les couleurs, donc
+// c'est l'exception, mais c'est bien une exception.
+//
+// Les défauts sont tes teintes habituelles (#26a69a, #ef5350, #2962ff,
+// #b0bec5), pas le vert/rouge/bleu de l'auteur : au premier affichage
+// l'indicateur ne ressemblera pas à ta v4.2. Deux clics pour revenir.
+//
+// RAPPEL DE LA v4.5 : la transparence du remplissage est le seul
+// changement de calcul depuis ta v4.2.
+//
+// POURQUOI CETTE LIGNE ET AUCUNE AUTRE. Le fill réutilisait
+// oscillatorColor tel quel. Or les transparences de tes cinq états ne
+// sont pas monotones : color.green = 0, vert pâle = 55, color.blue = 0,
+// rouge pâle = 55, color.red = 0. La zone remplie passait donc opaque /
+// voilée / opaque / voilée / opaque selon la force — et comme le bleu
+// est opaque lui aussi, ce n'est même pas « plus fort = plus dense ».
+// Mesuré : états pleins 43 %, neutre 31 % — soit 74 % du panneau en
+// aplat opaque, 26 % en voile. Uniformisé à 80.
+//
+// CE QUE JE N'AI PAS TOUCHÉ, APRÈS L'AVOIR MESURÉ. Ma v4.3/v4.4 séparait
+// « chauffe » et « canal nul » pour que le fond gris cesse de mentir. Le
+// raisonnement est juste, mais j'ai ensuite mesuré la fréquence du cas :
+// zéro pour cent, en SMA comme en EMA, sur 400 000 bougies de 10 ticks
+// et quatre régimes de tape. Il faudrait 77 bougies consécutives à corps
+// rigoureusement nul. Une correction qui ne se déclenche jamais n'a rien
+// à faire dans ton fichier : je la retire.
+//
+// CE QU'IL FAUT SAVOIR SUR CET INDICATEUR, ET QUI NE SE CORRIGE PAS.
+// Le canal est la moyenne de |oscillateur| calculée sur l'oscillateur
+// lui-même. Comparer une grandeur à sa propre moyenne absolue a un taux
+// de déclenchement FIXE : pour une loi normale centrée, E|X| = 0,7979 σ,
+// donc P(|osc| > canal) = 42,5 %, bande intermédiaire 26,5 %, neutre
+// 31,0 %. Vérifié en simulation (PAS des données NQ, flux de prints
+// synthétique agrégé en bougies de 10 ticks, 5 graines × 20 000
+// bougies) : 43,3 / 27,1 / 29,6 en tape active, et encore 41,2 / 23,9 /
+// 34,9 en tape FIGÉE, là où le corps moyen d'une bougie tombe à 0,07
+// point — un tiers de tick. « Vert plein » ne veut donc pas dire
+// « poussée forte » mais « poussée plus forte que sa propre moyenne
+// récente », ce qui arrive quatre fois sur dix quel que soit le marché.
+// Période et multiplicateur changent la douceur de la courbe, pas ce
+// taux. Et sur ton 10T le canal médian vaut 0,176 point, soit 0,7 tick :
+// il reste sous le pas de cotation 98 % du temps.
+//
+// Reste de l'en-tête d'origine — compatible Pine v5 :
+// - un seul type de moyenne pilote TOUT le moteur ;
+// - si RMA est choisie : oscillateur RMA + canal RMA ;
+// - si HMA est choisie : oscillateur HMA + canal HMA ;
+// - même logique pour SMA, EMA et WMA ;
+// - garde-fous sur les longueurs ;
+// - aucune couleur de force avant la chauffe complète du canal ;
+// - la HMA négative ne retourne plus brutalement le canal avec abs() ;
+// - aucune EMA de secours : le type choisi pilote toujours tout le moteur ;
+// - le gel d'un canal négatif ne concerne que la HMA ;
+// - masquer la ligne zéro ne masque plus le remplissage ;
+// - signature de fonction corrigée pour Pine v5 : paramètres inférés
+//   au lieu des déclarations typées réservées à la syntaxe plus récente.
+
+indicator(
+     title = "Swing Oscillator [AstrideUnicorn] — MA complète v4.9",
+     shorttitle = "Swing Osc MA v4.9",
+     overlay = false,
+     precision = 4,
+     max_bars_back = 5000)
+
+// =====================================================================
+// RÉGLAGES
+// =====================================================================
+
+g_engine = "Moteur"
+g_channel = "Canal"
+g_display = "Affichage"
+
+length = input.int(
+     7,
+     "Période",
+     minval = 2,
+     maxval = 500,
+     group = g_engine)
+
+maType = input.string(
+     "EMA",
+     "Type de moyenne — oscillateur ET canal",
+     options = ["SMA", "EMA", "HMA", "RMA", "WMA"],
+     tooltip = "Le type choisi pilote tout le calcul. Exemple : RMA = oscillateur RMA et canal RMA. HMA = oscillateur HMA et canal HMA.",
+     group = g_engine)
+
+channelMultiplier = input.int(
+     10,
+     "Longueur du canal × période",
+     minval = 1,
+     maxval = 20,
+     tooltip = "Longueur réelle du canal = période × multiplicateur, limitée à 5000 barres.",
+     group = g_channel)
+
+showHalfLevels = input.bool(
+     true,
+     "Afficher les niveaux intermédiaires ±0,5",
+     group = g_display)
+
+showZeroLine = input.bool(
+     true,
+     "Afficher la ligne zéro",
+     group = g_display)
+
+// ---------------------------------------------------------------------
+// COULEURS — AJOUTÉES EN v4.7, DÉLIBÉRÉMENT APRÈS LES CINQ AUTRES.
+// TradingView retient les réglages par position : ajoutées à la fin,
+// elles ne décalent aucune des cinq entrées d'origine.
+// L'ordre suivant est celui de l'écran, du haut du panneau vers le bas.
+// ---------------------------------------------------------------------
+
+g_colors = "Couleurs"
+
+colHausse = input.color(
+     #26a69a,
+     "1 · Hausse — force pleine",
+     tooltip = "Oscillateur au-dessus du canal. C'était « Couleur 1 » dans l'onglet Style.",
+     group = g_colors)
+
+colHausseDemi = input.color(
+     color.new(#26a69a, 55),
+     "2 · Hausse — demi-force",
+     tooltip = "Oscillateur entre la moitié du canal et le canal. C'était « Couleur 2 ». Garde-la plus transparente que la force pleine, sinon l'échelle se lit à l'envers.",
+     group = g_colors)
+
+colNeutre = input.color(
+     #2962ff,
+     "3 · Neutre",
+     tooltip = "Oscillateur dans la moitié intérieure du canal, et pendant la chauffe. C'était « Couleur 0 ».",
+     group = g_colors)
+
+colBaisseDemi = input.color(
+     color.new(#ef5350, 55),
+     "4 · Baisse — demi-force",
+     tooltip = "C'était « Couleur 4 ».",
+     group = g_colors)
+
+colBaisse = input.color(
+     #ef5350,
+     "5 · Baisse — force pleine",
+     tooltip = "Oscillateur sous le canal. C'était « Couleur 3 ».",
+     group = g_colors)
+
+colCanal = input.color(
+     #b0bec5,
+     "Canal ±1",
+     tooltip = "Les deux lignes du canal. Elles sont décochées chez toi : ce réglage ne servira que si tu les réaffiches.",
+     group = g_colors)
+
+colCanalDemi = input.color(
+     color.new(#b0bec5, 25),
+     "Canal ±0,5",
+     group = g_colors)
+
+transpRemplissage = input.int(
+     80,
+     "Transparence du remplissage (%)",
+     minval = 0,
+     maxval = 100,
+     tooltip = "Le seul réglage qui sépare la zone remplie de la courbe. La v4.2 lui faisait hériter la couleur de courbe telle quelle : opaque en force pleine ET en neutre, voilée seulement en demi-force — soit, mesuré sur 10 ticks, 74 % du panneau en aplat. 80 est le rendu calme ; 0 restitue exactement le rendu d'origine.",
+     group = g_colors)
+
+// ---------------------------------------------------------------------
+// RÉOUVERTURE — AJOUTÉE EN v4.8, EN FIN DE LISTE (14e réglage), pour ne
+// décaler aucune des treize entrées précédentes.
+// ---------------------------------------------------------------------
+
+g_reopen = "Réouverture"
+
+sautReouverture = input.bool(
+     true,
+     "Heikin Ashi : ignorer le saut de réouverture",
+     tooltip = "En Heikin Ashi, l'ouverture d'une bougie est le milieu de la précédente : après une pause (week-end, pause quotidienne), le saut de prix entre dans les corps des bougies suivantes, et l'oscillateur plonge ou monte sans que la reprise y soit pour rien. Coché : après une pause d'au moins 30 minutes, la chaîne Heikin Ashi repart de la première bougie de la reprise, pendant 20 bougies, puis l'ouverture du graphique est reprise telle quelle. Sans effet sur des bougies normales. Décoché : v4.7 à l'identique.",
+     group = g_reopen)
+
+oublierAvantPause = input.bool(
+     true,
+     "Réouverture : oublier les bougies d'avant la pause",
+     tooltip = "Après une pause d'au moins 30 minutes (week-end, pause quotidienne), l'oscillateur oublie les bougies d'avant la pause : elles comptent comme des corps nuls. Il repart donc du neutre et ne suit que la reprise. EMA et RMA : pendant 20 × période bougies, puis calcul habituel, identique à ce moment-là. SMA et WMA : tant que la fenêtre contient la pause (période − 1 bougies). HMA : non concernée. Décoché : v4.8 à l'identique.",
+     group = g_reopen)
+
+// =====================================================================
+// FONCTION DE MOYENNE
+// =====================================================================
+
+ma(source, requestedLength, selectedType) =>
+    int safeLength =
+         selectedType == "HMA" ?
+         math.max(requestedLength, 2) :
+         math.max(requestedLength, 1)
+
+    switch selectedType
+        "SMA" => ta.sma(source, safeLength)
+        "EMA" => ta.ema(source, safeLength)
+        "HMA" => ta.hma(source, safeLength)
+        "RMA" => ta.rma(source, safeLength)
+        "WMA" => ta.wma(source, safeLength)
+        => ta.ema(source, safeLength)
+
+// =====================================================================
+// MOTEUR
+// =====================================================================
+
+// v4.8 — Ouverture utilisée pour le corps. Sur un graphique Heikin Ashi,
+// après une pause d'au moins 30 minutes, la chaîne des ouvertures repart
+// de la première bougie de la reprise (réglage « Réouverture »).
+bool reopenFixActive = sautReouverture and chart.is_heikinashi
+bool reopenBar = not na(time[1]) and time - time[1] >= 30 * 60 * 1000
+
+var float cleanOpen = na
+var int barsSinceReopen = 100000
+
+if reopenBar
+    barsSinceReopen := 0
+    // Corps nul pour la première bougie : la chaîne repart d'elle.
+    cleanOpen := close
+else
+    barsSinceReopen := math.min(barsSinceReopen + 1, 100000)
+    // Même règle que TradingView : milieu de la bougie Heikin Ashi précédente.
+    cleanOpen := na(cleanOpen[1]) ? open : (cleanOpen[1] + close[1]) / 2
+
+float barOpen =
+     reopenFixActive and barsSinceReopen < 20 ?
+     cleanOpen :
+     open
+
+// Corps signé :
+// positif = poussée haussière ; négatif = poussée baissière.
+float barBody = close - barOpen
+
+// Le type choisi est utilisé ici.
+float oscillatorStandard = ma(barBody, length, maType)
+
+// v4.9 — Réouverture : les bougies d'avant la pause comptent comme des
+// corps nuls (réglage « oublier les bougies d'avant la pause »).
+int oscLength = math.max(length, 1)
+bool recursiveMa = maType == "EMA" or maType == "RMA"
+bool windowMa = maType == "SMA" or maType == "WMA"
+float recursiveAlpha = maType == "EMA" ? 2.0 / (oscLength + 1) : 1.0 / oscLength
+
+// EMA / RMA : même récurrence que TradingView, repartie de zéro.
+var float forgetRecursive = na
+if reopenBar
+    forgetRecursive := recursiveAlpha * barBody
+else if not na(forgetRecursive)
+    forgetRecursive := forgetRecursive + recursiveAlpha * (barBody - forgetRecursive)
+
+bool forgetActive =
+     oublierAvantPause and
+     ((recursiveMa and barsSinceReopen < 20 * oscLength) or
+      (windowMa and barsSinceReopen < oscLength - 1))
+
+// SMA / WMA : fenêtre où les corps d'avant la pause valent zéro.
+float forgetWindow = na
+if forgetActive and windowMa
+    float weightedSum = 0.0
+    float weightTotal = 0.0
+    for k = 0 to oscLength - 1
+        float w = maType == "WMA" ? float(oscLength - k) : 1.0
+        weightedSum += w * (k <= barsSinceReopen ? barBody[k] : 0.0)
+        weightTotal += w
+    forgetWindow := weightedSum / weightTotal
+
+float oscillator =
+     forgetActive ?
+     (recursiveMa ? forgetRecursive : forgetWindow) :
+     oscillatorStandard
+
+int channelLength =
+     math.min(
+         math.max(length * channelMultiplier, 2),
+         5000)
+
+// Le même type de moyenne est également utilisé pour le canal.
+// La source absolue mesure l'amplitude habituelle de l'oscillateur.
+float thresholdRaw =
+     ma(
+         math.abs(oscillator),
+         channelLength,
+         maType)
+
+// Une HMA peut momentanément dépasser sous zéro malgré une source
+// positive. On conserve alors la dernière valeur strictement positive.
+// Aucun autre type de moyenne n'est injecté comme secours.
+var float threshold = na
+
+if na(thresholdRaw)
+    threshold := na
+else if maType == "HMA" and thresholdRaw <= 0.0
+    // Une HMA peut dépasser sous zéro sur une source positive.
+    // On conserve seulement dans ce cas le dernier canal positif.
+    threshold := threshold[1]
+else
+    // Pour SMA, EMA, RMA et WMA, zéro est une valeur réelle :
+    // le canal doit pouvoir se contracter complètement en marché plat.
+    threshold := math.max(thresholdRaw, 0.0)
+
+// Le moteur n'affiche aucune force tant que l'oscillateur ET le canal
+// ne disposent pas d'une valeur exploitable.
+bool ready =
+     not na(oscillator) and
+     not na(threshold) and
+     threshold > 0.0
+
+float halfThreshold =
+     ready ?
+     threshold * 0.5 :
+     na
+
+// =====================================================================
+// COULEURS
+// =====================================================================
+
+// Cinq couleurs indépendantes, aucune calculée à partir d'une autre :
+// c'est ce qui supprime l'inversion d'échelle de ma v4.6.
+color oscillatorColor =
+     not ready ?
+         colNeutre :
+     oscillator > threshold ?
+         colHausse :
+     oscillator > halfThreshold ?
+         colHausseDemi :
+     oscillator < -threshold ?
+         colBaisse :
+     oscillator < -halfThreshold ?
+         colBaisseDemi :
+         colNeutre
+
+// =====================================================================
+// TRACÉS
+// =====================================================================
+
+oscillatorPlot = plot(
+     oscillator,
+     title = "Swing Oscillator",
+     color = oscillatorColor,
+     linewidth = 1)
+
+zeroPlot = plot(
+     0.0,
+     title = "Zéro",
+     color = showZeroLine ? oscillatorColor : na,
+     linewidth = 1)
+
+fill(
+     oscillatorPlot,
+     zeroPlot,
+     color = color.new(oscillatorColor, transpRemplissage),
+     title = "Remplissage")
+
+plot(
+     ready ? threshold : na,
+     title = "Canal supérieur",
+     color = colCanal,
+     linewidth = 1)
+
+plot(
+     ready ? -threshold : na,
+     title = "Canal inférieur",
+     color = colCanal,
+     linewidth = 1)
+
+plot(
+     showHalfLevels and ready ? halfThreshold : na,
+     title = "Canal supérieur 0,5",
+     color = colCanalDemi,
+     linewidth = 1)
+
+plot(
+     showHalfLevels and ready ? -halfThreshold : na,
+     title = "Canal inférieur 0,5",
+     color = colCanalDemi,
+     linewidth = 1)
+
+bgcolor(
+     ready ?
+     na :
+     color.new(color.gray, 92),
+     title = "Chauffe du canal")
+
+// =====================================================================
+// DIAGNOSTICS
+// =====================================================================
+
+plot(
+     thresholdRaw,
+     title = "Diagnostic · canal brut selon la MA choisie",
+     display = display.data_window)
+
+plot(
+     threshold,
+     title = "Diagnostic · canal positif",
+     display = display.data_window)
+
+plot(
+     channelLength,
+     title = "Diagnostic · longueur du canal",
+     display = display.data_window)
+
+plot(
+     ready ? 1 : 0,
+     title = "Diagnostic · moteur prêt",
+     display = display.data_window)
+
+plot(
+     maType == "HMA" and not na(thresholdRaw) and thresholdRaw <= 0.0 ? 1 : 0,
+     title = "Diagnostic · dépassement négatif HMA",
+     display = display.data_window)
+
+plot(
+     reopenFixActive and barsSinceReopen < 20 ? 1 : 0,
+     title = "Diagnostic · correction de réouverture active",
+     display = display.data_window)
+
+plot(
+     forgetActive ? 1 : 0,
+     title = "Diagnostic · oubli d'avant la pause actif",
+     display = display.data_window)
