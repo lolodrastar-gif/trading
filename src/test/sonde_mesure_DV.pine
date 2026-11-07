@@ -1,0 +1,370 @@
+//@version=6
+// SONDE DE SECOND NIVEAU, produite par l'étude de faisabilité du 07/11, NON relue ligne
+// par ligne : à ne poser qu'après la sonde d'exactitude, et seulement si elle passe.
+// ============================================================================
+// SONDE MESURE [DV] — à poser sur le graphique NQ 10T EN DIRECT, à lire dans la
+// fenêtre de données (et l'étiquette), puis à retirer. Indicateur séparé : le
+// BSP n'est pas touché. Pine NON compilé ici (aucun compilateur hors
+// TradingView) : si l'éditeur signale une ligne, la corriger avant de mesurer.
+// ----------------------------------------------------------------------------
+// CE QU'ELLE MESURE, par bougie 10T close en direct (compteurs cumulés) :
+//  E — EXÉCUTIONS : une mise à jour du graphique = une transaction ?
+//      E01 bougies closes vues ; E02 bougies à exactement dix PAS (mises à jour
+//      dont le prix OU le volume a changé) ; E03 exécutions sans aucun
+//      changement (cumul) ; E04 bougies avec 0 ou >1 exécution confirmée ;
+//      E05 pas dont le saut de prix dépasse un pas de cotation ; E06 saut max
+//      (en pas de cotation) ; E07 bougies dont le chemin des prix vus (plus
+//      haut / plus bas des closes successifs) N'ATTEINT PAS le high ou le low
+//      de la bougie — un extrême a été sauté : REGROUPEMENT PROUVÉ.
+//  L — LIVRAISON 1T (retard par bougie) :
+//      L01 bougies sans aucun élément 1T à leur exécution confirmée ;
+//      L02 bougies dont le tableau figé [1] est VIDE à l'ouverture de la
+//      suivante (première lecture différée du BSP) ; L03 ... encore vide à
+//      la clôture de la suivante (ce que le BSP ponte pour de bon : reprise,
+//      puis gris) ; L04 ... encore vide deux bougies plus tard ;
+//      L05 tableaux de N qui GROSSISSENT pendant N+1 (le « figé » ne l'est
+//      pas) ; L06 retard 1T maximal observé (ms : ouverture de la bougie en
+//      cours − heure du plus récent tick 1T connu, profondeur 3 bougies) ;
+//      L07 somme des PAS vus par le graphique sur les bougies L02 (L07 / L02 =
+//      pas moyens sur les bougies que le BSP ponte : le graphique, lui,
+//      voyait-il les transactions ?).
+//  S — OMBRE : les formules du moteur (BSP_v43_iter.pine L1047-1128,
+//      « Ratio des moyennes », RMA/EMA) nourries par les mises à jour du
+//      graphique (high = low = close = prix de la transaction), ANCRÉES à
+//      l'ouverture de chaque bougie sur l'état EXACT du moteur 1T (dernier
+//      tick 1T de la bougie précédente, s'il porte son prix de clôture et que
+//      le préchauffage est fini), comparées au moteur 1T à la clôture :
+//      S01 ancrages ; S02 bougies comparées STRICTES (ancrée à son ouverture,
+//      dix pas vus, dernier tick 1T = clôture) ; S03 écart max |ombre − 1T|
+//      sur ces bougies (points de BP) ; S04 bougies strictes à écart > 1e-6 ;
+//      S05 états différents sur bougies strictes ; S06 bougies comparées NON
+//      strictes (ombre non ré-ancrée à l'ouverture, i.e. dérive sur plusieurs
+//      bougies) ; S07 écart max sur celles-ci ; S08 dernier écart (signé).
+// ----------------------------------------------------------------------------
+// PROTOCOLE : 1) régler Longueur / écrêtage / gris comme dans le BSP ;
+// 2) ajouter la sonde vers 15:20 Paris (ou 21:45), ne plus toucher à aucun
+// réglage (un changement recharge et remet les compteurs à zéro) ; 3) noter
+// la fenêtre de données à 15:29 (calme), 15:33 et 15:36 (rafale), puis vers
+// 21:56 et 22:01 ; 4) retirer la sonde. Au moins 300 bougies closes au total.
+// ----------------------------------------------------------------------------
+// SEUILS (décidés AVANT la mesure ; modèle : seuils_model.py) :
+//  P1 « une mise à jour = une transaction » : E02 / E01 ≥ 0,95 au calme et
+//     ≥ 0,90 dans la rafale ; E07 ≤ 1 % de E01 ; E04 ≤ 1 % de E01.
+//     ÉCHEC si E07 > 5 % dans la rafale (regroupement prouvé : au modèle,
+//     une transaction perdue par bougie sans ré-ancrage pendant 30-160
+//     bougies = 0,3-0,5 pt d'écart et 2-4 % d'états faux ; trois perdues =
+//     1,0-1,4 pt et 4-9 %).
+//  P2 « l'ombre reproduit le moteur 1T » : S02 ≥ 100 ; S04 ≤ 1 % de S02 ;
+//     S05 = 0. Attendu au modèle : 0,000 exactement (une transaction perdue
+//     donne 0,002 pt en médiane, 0,13 pt au plus : S03 > 0,01 = une
+//     transaction manque quelque part — barre 1T non unitaire, ou flux
+//     différents). ÉCHEC si S04 > 5 % de S02.
+//  P3 « le moteur aurait eu les données là où le BSP ponte » : L02 ≥ 10 dans
+//     la fenêtre ET L07 / L02 ≥ 9. ÉCHEC si L07 / L02 < 7 (le flux du
+//     graphique cale en même temps que le 1T : le moteur direct hérite du trou).
+//  P1 ∧ P2 ∧ P3 → construire le moteur direct (moteur_direct_patch.pine).
+//  Un ÉCHEC → ne pas le construire comme « mesure » ; L02-L06 disent alors
+//  seulement de combien de bougies le 1T est en retard.
+// ============================================================================
+indicator("Sonde mesure [DV] — exécutions, livraison 1T, ombre", shorttitle = "SONDE_DV", overlay = true)
+
+// ── Réglages : les mêmes que le BSP (groupe 1 et seuils de gris) ──
+int lengthInput = input.int(233, "Longueur (ticks 1T)", minval = 2, maxval = 500)
+string averageType = input.string("RMA", "Type de moyenne", options = ["RMA", "EMA"])
+float rangeCapMultiplier = input.float(3.618, "Écrêtage d'amplitude", minval = 1.05, maxval = 20.0, step = 0.001)
+float neutralEnterSpread = input.float(1.618, "Retour au gris — écart (%)", minval = 0.0, maxval = 50.0, step = 0.001)
+float neutralExitSpread = input.float(3.618, "Sortie du gris — écart (%)", minval = 0.0, maxval = 50.0, step = 0.001)
+int tickHistoryInput = input.int(20000, "Historique 1T demandé (ticks)", minval = 2000, maxval = 200000, step = 1000)
+
+const float MIN_MOVE_TICKS = 0.5
+const float MIN_RANGE_TICKS = 0.00000001
+const int EXPECTED_TICKS = 10
+const float STRICT_TOLERANCE = 0.000001
+
+clamp(float value, float minimum, float maximum) =>
+    math.min(math.max(value, minimum), maximum)
+
+// nextSignalState : copie de BSP_v43_iter.pine L395-409.
+nextSignalState(int previousState, float currentSpread, float enterThreshold, float exitThreshold) =>
+    int result = 0
+    if na(currentSpread)
+        result := 0
+    else if previousState == 1
+        result := currentSpread < -exitThreshold ? -1 : currentSpread <= enterThreshold ? 0 : 1
+    else if previousState == -1
+        result := currentSpread > exitThreshold ? 1 : currentSpread >= -enterThreshold ? 0 : -1
+    else
+        result := currentSpread > exitThreshold ? 1 : currentSpread < -exitThreshold ? -1 : 0
+    result
+
+// ── Moteur 1T : formules de bspEngine1T (L1047-1128), « Ratio des moyennes »,
+// RMA ou EMA ; DEUX séries de plus exportées (buyerAverage, rangeAverage)
+// pour l'ancrage exact de l'ombre. Formules intactes. ──
+engine1T(simple int length, simple string kind, simple float capMultiplier, simple float enterThreshold, simple float requestedExitThreshold) =>
+    float safeMinimumTick = syminfo.mintick
+    float previousClose = nz(close[1], close)
+    float buyerRaw = close - math.min(low, previousClose)
+    float sellerRaw = math.max(high, previousClose) - close
+    float trueRange = buyerRaw + sellerRaw
+    bool validRange = trueRange / safeMinimumTick >= MIN_MOVE_TICKS
+    var float lastBuyerShare = 0.5
+    if validRange
+        lastBuyerShare := buyerRaw / trueRange
+    float buyerRatio = lastBuyerShare
+    var float rangeReference = na
+    var float referenceInTicks = na
+    float buyerEffective = 0.0
+    float rangeEffective = 0.0
+    if validRange
+        float previousReference = nz(rangeReference[1], math.max(trueRange, safeMinimumTick))
+        float maximumRange = capMultiplier * math.max(previousReference, safeMinimumTick)
+        float cappedRange = math.min(trueRange, maximumRange)
+        rangeEffective := cappedRange / safeMinimumTick
+        buyerEffective := buyerRatio * rangeEffective
+        rangeReference := na(rangeReference[1]) ? cappedRange : previousReference + (cappedRange - previousReference) / length
+        referenceInTicks := na(rangeReference) ? na : rangeReference / safeMinimumTick
+    float buyerAverage = kind == "EMA" ? ta.ema(buyerEffective, length) : ta.rma(buyerEffective, length)
+    float rangeAverage = kind == "EMA" ? ta.ema(rangeEffective, length) : ta.rma(rangeEffective, length)
+    bool weightedDenominatorReady = not na(rangeAverage) and rangeAverage > MIN_RANGE_TICKS
+    float buyerPercentRaw = weightedDenominatorReady ? buyerAverage / rangeAverage * 100.0 : na
+    float buyerPercentClamped = na(buyerPercentRaw) ? na : clamp(buyerPercentRaw, 0.0, 100.0)
+    int warmupTarget = 3 * length
+    var int processedTickCount = 0
+    if processedTickCount < warmupTarget
+        processedTickCount := processedTickCount + 1
+    bool hasCalculatedValue = not na(buyerPercentClamped)
+    bool engineWarm = hasCalculatedValue and processedTickCount >= warmupTarget
+    float engineSpread = hasCalculatedValue ? 2.0 * buyerPercentClamped - 100.0 : na
+    float exitThreshold = math.max(requestedExitThreshold, enterThreshold)
+    var int signalState = 0
+    signalState := engineWarm ? nextSignalState(signalState, engineSpread, enterThreshold, exitThreshold) : 0
+    float warmupPercent = processedTickCount >= warmupTarget ? 100.0 : math.min(processedTickCount / math.max(float(warmupTarget), 1.0) * 100.0, 100.0)
+    [buyerPercentRaw, signalState, warmupPercent, referenceInTicks, time, close, buyerAverage, rangeAverage]
+
+[rawT, stateT, warmT, refT, timeT, closeT, bAvgT, rAvgT] = request.security_lower_tf(syminfo.tickerid, "1T", engine1T(lengthInput, averageType, rangeCapMultiplier, neutralEnterSpread, neutralExitSpread), calc_bars_count = tickHistoryInput)
+
+float exitThresholdChart = math.max(neutralExitSpread, neutralEnterSpread)
+float alpha = averageType == "EMA" ? 2.0 / (lengthInput + 1) : 1.0 / lengthInput
+
+// Tableaux figés : [1] = bougie précédente, [2] = celle d'avant (lecture du retard).
+array<int> time1 = bar_index >= 1 ? timeT[1] : array.new<int>()
+array<int> time2 = bar_index >= 2 ? timeT[2] : array.new<int>()
+int n0 = array.size(timeT)
+int n1 = array.size(time1)
+int n2 = array.size(time2)
+
+// ── Compteurs de la bougie en cours (varip : jamais défaits par le retour en arrière) ──
+varip int execs = 0
+varip int steps = 0
+varip int noChange = 0
+varip int confirmedSeen = 0
+varip int bigJumps = 0
+varip float seenClose = na
+varip float seenVolume = na
+varip float pathHigh = na
+varip float pathLow = na
+varip int n0AtConfirmed = -1       // taille du tableau vivant à l'exécution confirmée de la bougie
+varip int n1AtOpen = -1            // taille de [1] (bougie précédente) à l'ouverture de celle-ci
+varip int n1AtConfirmed = -1       // taille de [1] à l'exécution confirmée de celle-ci
+// Rechargement au milieu d'une bougie : barstate.isnew n'y est pas vrai
+// (manuel execution-model.md L607) ; cette bougie partielle n'est pas comptée.
+varip bool barStartedHere = false
+// ── Ombre ──
+varip bool shAnchored = false
+varip bool shAnchoredAtOpen = false
+varip float shPrevClose = na
+varip float shShare = 0.5
+varip float shRangeRef = na
+varip float shBuyerAvg = na
+varip float shRangeAvg = na
+varip int shState = 0
+// ── Cumuls (varip : comptés à l'ouverture de la bougie suivante, hors retour en arrière) ──
+varip int e01 = 0
+varip int e02 = 0
+varip int e03 = 0
+varip int e04 = 0
+varip int e05 = 0
+varip float e06 = 0.0
+varip int e07 = 0
+varip int l01 = 0
+varip int l02 = 0
+varip int l03 = 0
+varip int l04 = 0
+varip int l05 = 0
+varip int l06 = 0
+varip int l07 = 0
+varip int s01 = 0
+varip int s02 = 0
+varip float s03 = 0.0
+varip int s04 = 0
+varip int s05 = 0
+varip int s06 = 0
+varip float s07 = 0.0
+varip float s08 = na
+varip string lastBars = ""
+
+if barstate.isrealtime
+    if barstate.isnew
+        // 1. BILAN DE LA BOUGIE PRÉCÉDENTE (ses compteurs varip sont encore là ;
+        //    ses OHLC sont [1] ; son tableau 1T figé est [1]).
+        bool bookPrev = execs > 0 and barStartedHere
+        if bookPrev
+            e01 += 1
+            if steps == EXPECTED_TICKS
+                e02 += 1
+            if confirmedSeen != 1
+                e04 += 1
+            if not (pathHigh >= high[1] and pathLow <= low[1])
+                e07 += 1
+            if n0AtConfirmed == 0
+                l01 += 1
+            if n1 == 0
+                l02 += 1
+                l07 += steps
+            // Tableau de la bougie N−1 ([2] maintenant) : vide à l'ouverture de N
+            // (n1AtOpen = 0), a-t-il reçu quelque chose depuis ?
+            if n1AtOpen == 0 and n1AtConfirmed == 0
+                l03 += 1
+            if n1AtOpen == 0 and n2 == 0
+                l04 += 1
+            if n1AtOpen >= 0 and n1AtConfirmed > n1AtOpen
+                l05 += 1
+        // 2. ÉCART OMBRE / 1T à la clôture de la bougie précédente.
+        float rawPrev = n1 > 0 ? array.get(rawT[1], n1 - 1) : na
+        int statePrev = n1 > 0 ? array.get(stateT[1], n1 - 1) : 0
+        float warmPrev = n1 > 0 ? array.get(warmT[1], n1 - 1) : na
+        float refPrev = n1 > 0 ? array.get(refT[1], n1 - 1) : na
+        float closePrev = n1 > 0 ? array.get(closeT[1], n1 - 1) : na
+        float bAvgPrev = n1 > 0 ? array.get(bAvgT[1], n1 - 1) : na
+        float rAvgPrev = n1 > 0 ? array.get(rAvgT[1], n1 - 1) : na
+        int timePrev = n1 > 0 ? array.get(time1, n1 - 1) : na
+        bool prevLastTick = n1 > 0 and not na(closePrev) and math.abs(closePrev - close[1]) / syminfo.mintick < MIN_MOVE_TICKS and not na(timePrev) and timePrev >= time[1]
+        float shRawPrev = shAnchored and not na(shRangeAvg) and shRangeAvg > MIN_RANGE_TICKS ? shBuyerAvg / shRangeAvg * 100.0 : na
+        if bookPrev and shAnchored and prevLastTick and not na(rawPrev) and not na(shRawPrev)
+            float diff = shRawPrev - rawPrev
+            s08 := diff
+            if shAnchoredAtOpen and steps == EXPECTED_TICKS
+                s02 += 1
+                s03 := math.max(s03, math.abs(diff))
+                if math.abs(diff) > STRICT_TOLERANCE
+                    s04 += 1
+                if shState != statePrev
+                    s05 += 1
+            else
+                s06 += 1
+                s07 := math.max(s07, math.abs(diff))
+        // 3. ANCRAGE EXACT sur le dernier tick 1T de la bougie précédente.
+        shAnchoredAtOpen := false
+        if prevLastTick and not na(warmPrev) and warmPrev >= 100.0 and not na(bAvgPrev) and not na(rAvgPrev)
+            shPrevClose := closePrev
+            shRangeRef := na(refPrev) ? na : refPrev * syminfo.mintick
+            shBuyerAvg := bAvgPrev
+            shRangeAvg := rAvgPrev
+            shState := statePrev
+            shAnchored := true
+            shAnchoredAtOpen := true
+            s01 += 1
+        // 4. Résumé des dernières bougies closes et remise à zéro.
+        if bookPrev
+            lastBars :=str.tostring(execs) + "/" + str.tostring(steps) + "/" + str.tostring(noChange) + "/" + str.tostring(confirmedSeen) + "/" + str.tostring(n0AtConfirmed) + "/" + str.tostring(n1) + (na(s08) ? "" : "/" + str.tostring(s08, "#.####")) + "  " + str.substring(lastBars, 0, math.min(str.length(lastBars), 180))
+        execs := 0
+        steps := 0
+        noChange := 0
+        confirmedSeen := 0
+        bigJumps := 0
+        pathHigh := na
+        pathLow := na
+        n0AtConfirmed := -1
+        n1AtOpen := n1
+        n1AtConfirmed := -1
+        barStartedHere := true
+    // 5. CETTE EXÉCUTION : une transaction nouvelle ? (prix OU volume changé).
+    execs += 1
+    bool closeChanged = na(seenClose) or close != seenClose
+    bool volumeChanged = nz(volume) != nz(seenVolume)
+    bool newTrade = barstate.isnew or closeChanged or volumeChanged
+    if newTrade
+        steps += 1
+        if not barstate.isnew and not na(seenClose)
+            float jumpTicks = math.abs(close - seenClose) / syminfo.mintick
+            e06 := math.max(e06, jumpTicks)
+            if jumpTicks > 1.0 + MIN_MOVE_TICKS
+                e05 += 1
+        pathHigh := na(pathHigh) ? close : math.max(pathHigh, close)
+        pathLow := na(pathLow) ? close : math.min(pathLow, close)
+        if shAnchored
+            // Un pas du moteur (L1047-1128) avec high = low = close = prix de la
+            // transaction et le prix précédent en mémoire varip.
+            float price = close
+            float buyerRaw = price - math.min(price, shPrevClose)
+            float sellerRaw = math.max(price, shPrevClose) - price
+            float trueRange = buyerRaw + sellerRaw
+            bool validRange = trueRange / syminfo.mintick >= MIN_MOVE_TICKS
+            if validRange
+                shShare := buyerRaw / trueRange
+            float buyerEffective = 0.0
+            float rangeEffective = 0.0
+            if validRange
+                float previousReference = nz(shRangeRef, math.max(trueRange, syminfo.mintick))
+                float maximumRange = rangeCapMultiplier * math.max(previousReference, syminfo.mintick)
+                float cappedRange = math.min(trueRange, maximumRange)
+                rangeEffective := cappedRange / syminfo.mintick
+                buyerEffective := shShare * rangeEffective
+                shRangeRef := na(shRangeRef) ? cappedRange : previousReference + (cappedRange - previousReference) / lengthInput
+            // ta.rma : alpha = 1 / longueur ; ta.ema : 2 / (longueur + 1) (référence).
+            shBuyerAvg := alpha * buyerEffective + (1.0 - alpha) * shBuyerAvg
+            shRangeAvg := alpha * rangeEffective + (1.0 - alpha) * shRangeAvg
+            float raw = shRangeAvg > MIN_RANGE_TICKS ? shBuyerAvg / shRangeAvg * 100.0 : na
+            float spread = na(raw) ? na : 2.0 * clamp(raw, 0.0, 100.0) - 100.0
+            shState := nextSignalState(shState, spread, neutralEnterSpread, exitThresholdChart)
+            shPrevClose := price
+    else
+        e03 += 1
+        noChange += 1
+    if barstate.isconfirmed
+        confirmedSeen += 1
+        n0AtConfirmed := n0
+        n1AtConfirmed := n1
+    // 6. RETARD 1T : heure du plus récent tick 1T connu (profondeur 3) face à
+    //    l'ouverture de la bougie en cours.
+    int newest1T = n0 > 0 ? array.get(timeT, n0 - 1) : n1 > 0 ? array.get(time1, n1 - 1) : n2 > 0 ? array.get(time2, n2 - 1) : na
+    if not na(newest1T) and time - newest1T > l06
+        l06 := time - newest1T
+    seenClose := close
+    seenVolume := nz(volume)
+
+// ── Étiquette (dernière bougie) ──
+var label probe = label.new(bar_index, high, "", style = label.style_label_down, color = color.blue, textcolor = color.white)
+if barstate.islast
+    label.set_xy(probe, bar_index, high)
+    label.set_text(probe,
+      "en cours : exéc " + str.tostring(execs) + " / pas " + str.tostring(steps) + " / sans chgt " + str.tostring(noChange) + " / 1T vivants " + str.tostring(n0)
+      + "\nE closes " + str.tostring(e01) + " ; à dix pas " + str.tostring(e02) + " ; chemin ≠ H/L " + str.tostring(e07) + " ; confirmées ≠ 1 : " + str.tostring(e04)
+      + "\nL vides à la lecture " + str.tostring(l02) + " (pas vus : " + str.tostring(l07) + ") ; encore vides +1/+2 : " + str.tostring(l03) + "/" + str.tostring(l04) + " ; retard max " + str.tostring(l06) + " ms"
+      + "\nS strictes " + str.tostring(s02) + " ; écart max " + str.tostring(s03, "#.######") + " ; > 1e-6 : " + str.tostring(s04) + " ; états ≠ " + str.tostring(s05) + " ; dérive max " + str.tostring(s07, "#.####")
+      + "\n(exéc/pas/sansChgt/confirmées/1T à la clôture/1T lus/écart)\n" + lastBars)
+
+// ── Fenêtre de données (cumuls depuis la pose) ──
+color hidden = color.new(color.gray, 100)
+plot(e01, "E01 — bougies closes vues", color = hidden, precision = 0, display = display.data_window)
+plot(e02, "E02 — dont à exactement dix pas", color = hidden, precision = 0, display = display.data_window)
+plot(e03, "E03 — exécutions sans changement (cumul)", color = hidden, precision = 0, display = display.data_window)
+plot(e04, "E04 — bougies à 0 ou >1 exécution confirmée", color = hidden, precision = 0, display = display.data_window)
+plot(e05, "E05 — pas à saut > 1 pas de cotation", color = hidden, precision = 0, display = display.data_window)
+plot(e06, "E06 — saut max (pas de cotation)", color = hidden, precision = 1, display = display.data_window)
+plot(e07, "E07 — bougies au chemin ≠ high/low (regroupement)", color = hidden, precision = 0, display = display.data_window)
+plot(l01, "L01 — bougies sans tick 1T à leur clôture", color = hidden, precision = 0, display = display.data_window)
+plot(l02, "L02 — bougies lues VIDES par la suivante (pontées)", color = hidden, precision = 0, display = display.data_window)
+plot(l03, "L03 — encore vides à la clôture de la suivante", color = hidden, precision = 0, display = display.data_window)
+plot(l04, "L04 — encore vides deux bougies plus tard", color = hidden, precision = 0, display = display.data_window)
+plot(l05, "L05 — tableaux figés qui ont grossi pendant N+1", color = hidden, precision = 0, display = display.data_window)
+plot(l06, "L06 — retard 1T max (ms)", color = hidden, precision = 0, display = display.data_window)
+plot(l07, "L07 — pas vus par le graphique sur les bougies L02", color = hidden, precision = 0, display = display.data_window)
+plot(s01, "S01 — ancrages de l'ombre", color = hidden, precision = 0, display = display.data_window)
+plot(s02, "S02 — bougies comparées strictes", color = hidden, precision = 0, display = display.data_window)
+plot(s03, "S03 — écart max |ombre − 1T| strict (points)", color = hidden, precision = 6, display = display.data_window)
+plot(s04, "S04 — strictes à écart > 1e-6", color = hidden, precision = 0, display = display.data_window)
+plot(s05, "S05 — états différents (strictes)", color = hidden, precision = 0, display = display.data_window)
+plot(s06, "S06 — bougies comparées non strictes (dérive)", color = hidden, precision = 0, display = display.data_window)
+plot(s07, "S07 — écart max non strict (points)", color = hidden, precision = 4, display = display.data_window)
+plot(s08, "S08 — dernier écart ombre − 1T (signé)", color = hidden, precision = 4, display = display.data_window)

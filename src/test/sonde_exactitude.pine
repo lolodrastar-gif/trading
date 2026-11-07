@@ -1,0 +1,89 @@
+//@version=6
+// Relue et corrigée le 07/11 (garde sur tableau 1T vide, 20 000 ticks d'historique). Pine non compilé ici.
+// SONDE D'EXACTITUDE (10T, en direct, une minute en calme puis pendant une
+// rafale : 15:30 Paris ou 21:50-22:00). À ajouter, lire, retirer. Elle mesure
+// les trois hypothèses du moteur direct [DV] — aucune n'est documentée :
+//   H1  exécutions par bougie 10T close = 10, dont 0 sans changement de prix ni
+//       de volume, et 1 seule exécution confirmée ;
+//   H2  barres 1T à high ≠ low (une barre 1T = une transaction ?) : 0 ;
+//   H3  somme des volumes 1T de la bougie = volume 10T de la bougie : OUI.
+// Compteur varip remis à zéro sur barstate.isnew : patron du manuel
+// (language/execution-model.md, « Executions on realtime bars »).
+indicator("Sonde exactitude [DV]", overlay = true)
+[range1T, volume1T] = request.security_lower_tf(syminfo.tickerid, "1T", [high - low, volume], calc_bars_count = 20000)
+varip int execs = 0
+varip int noChange = 0
+varip int confirmedSeen = 0
+varip float lastClose = na
+varip float lastVolume = na
+varip string lastBars = ""
+var int barsSeen = 0
+var int barsExec10 = 0
+var int barsNoChange0 = 0
+var int barsConfirmed1 = 0
+var int bars1TMulti = 0
+var int barsVolMatch = 0
+var int barsTicks10 = 0
+if barstate.isrealtime
+    if barstate.isnew
+        execs := 0
+        noChange := 0
+        confirmedSeen := 0
+    execs += 1
+    if execs > 1 and close == lastClose and nz(volume) == nz(lastVolume)
+        noChange += 1
+    if barstate.isconfirmed
+        confirmedSeen += 1
+        int ticks1T = array.size(range1T)
+        int multi = 0
+        float sumVol = 0.0
+        // Garde : sur une bougie sans aucun tick 1T livré (rafale), le tableau
+        // est vide ; « for i = 0 to -1 » compterait à rebours et lirait l'index 0.
+        if ticks1T > 0
+            for i = 0 to ticks1T - 1
+                if array.get(range1T, i) > 0
+                    multi += 1
+                sumVol += nz(array.get(volume1T, i))
+        bool volMatch = ticks1T > 0 and math.abs(sumVol - nz(volume)) < 0.5
+        barsSeen += 1
+        barsExec10 += execs == 10 ? 1 : 0
+        barsNoChange0 += noChange == 0 ? 1 : 0
+        barsConfirmed1 += confirmedSeen == 1 ? 1 : 0
+        bars1TMulti += multi > 0 ? 1 : 0
+        barsVolMatch += volMatch ? 1 : 0
+        barsTicks10 += ticks1T == 10 ? 1 : 0
+        lastBars := str.tostring(execs) + "/" + str.tostring(noChange) + "/" + str.tostring(confirmedSeen) + "/" + str.tostring(ticks1T) + "/" + str.tostring(multi) + "/" + (volMatch ? "V" : "x") + "  " + str.substring(lastBars, 0, math.min(str.length(lastBars), 140))
+    lastClose := close
+    lastVolume := nz(volume)
+// Historique : H2 et H3 se mesurent aussi sur toutes les bougies chargées.
+var int histBars = 0
+var int histMulti = 0
+var int histVolMatch = 0
+if not barstate.isrealtime and array.size(range1T) > 0
+    int m = 0
+    float sv = 0.0
+    for i = 0 to array.size(range1T) - 1
+        if array.get(range1T, i) > 0
+            m += 1
+        sv += nz(array.get(volume1T, i))
+    histBars += 1
+    histMulti += m > 0 ? 1 : 0
+    histVolMatch += math.abs(sv - nz(volume)) < 0.5 ? 1 : 0
+var label probe = label.new(bar_index, high, "", style = label.style_label_down, color = color.blue, textcolor = color.white)
+if barstate.islast
+    label.set_xy(probe, bar_index, high)
+    label.set_text(probe,
+      "bougie en cours : exéc " + str.tostring(execs) + ", sans changement " + str.tostring(noChange)
+      + "\nbougies closes en direct : " + str.tostring(barsSeen)
+      + "  exéc=10 : " + str.tostring(barsExec10) + "  sansChgt=0 : " + str.tostring(barsNoChange0) + "  confirmées=1 : " + str.tostring(barsConfirmed1)
+      + "\n  ticks1T=10 : " + str.tostring(barsTicks10) + "  barres 1T à high≠low : " + str.tostring(bars1TMulti) + "  volume 1T = volume 10T : " + str.tostring(barsVolMatch)
+      + "\nhistorique : " + str.tostring(histBars) + " bougies, " + str.tostring(histMulti) + " avec une barre 1T à high≠low, " + str.tostring(histVolMatch) + " au volume concordant"
+      + "\ndernières closes (exéc/sansChgt/confirmées/ticks1T/1T multi/volume) :\n" + lastBars)
+plot(execs, "exécutions bougie en cours", display = display.data_window)
+plot(barsSeen, "bougies closes en direct", display = display.data_window)
+plot(barsExec10, "dont exécutions = 10", display = display.data_window)
+plot(barsNoChange0, "dont aucune exécution sans changement", display = display.data_window)
+plot(barsConfirmed1, "dont une seule exécution confirmée", display = display.data_window)
+plot(barsTicks10, "dont 10 ticks 1T livrés", display = display.data_window)
+plot(bars1TMulti, "dont une barre 1T à high≠low", display = display.data_window)
+plot(barsVolMatch, "dont volume 1T = volume 10T", display = display.data_window)
