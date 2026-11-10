@@ -38,3 +38,12 @@ Conforme a la demande. Aucun defaut de calcul trouve. Trois retouches conseillee
   En pratique cela ne concerne que le debut de l'historique.
 - Avec 1 cloture et plancher 0, la ligne "Verdict" de la fenetre de donnees montre sur la bougie en cours
   le verdict de la cloture precedente (la v0.2 montrait une valeur provisoire). Barres cloturees : identiques.
+
+## Version retouchee (second collage du 10/11)
+
+Fichier : `src/lolo2/LOLO2_filtre_chop_atr_v0.3_codex_r2.pine`, enregistre tel quel.
+Diff exact contre la premiere v0.3 : 7 lignes, toutes dans les trois retouches demandees
+(info-bulle et `display.none` sur les 2 reglages, `floorOk` avec "Plancher trop haut" / "REGLAGES",
+cause "Confirmation k/N" des que le brut depasse le verdict confirme). Machine de confirmation inchangee.
+Controle statique : 0 probleme. Avec plancher 0, `floorOk` est toujours vrai (vigilance >= 0.1),
+donc l'identite avec la v0.2 a 1 cloture reste acquise. Non compile ici.
