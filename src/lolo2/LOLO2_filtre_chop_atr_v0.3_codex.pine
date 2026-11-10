@@ -1,0 +1,166 @@
+//@version=6
+indicator("LOLO 2 - Filtre CHOP/ATR (TEST v0.3)", "L2 FILTRE", overlay = true)
+
+// Tableau de CONTEXTE, pas un signal d'achat/vente.
+// Concu pour une UT temporelle (essai initial : NAS100 en 1 minute).
+// Les seuils sont experimentaux ; verifier leur utilite sur les trades historiques.
+//
+// v0.2 (10/11) : MEME calcul et MEME verdict que la v0.1 (reglages par defaut,
+// ou tout reglage dont les seuils sont dans l'ordre). Les 7 reglages d'origine
+// gardent leur position ; les nouveaux sont ajoutes a la fin.
+// Corrige :
+//   - formats d'affichage ("#.1" n'est pas un format documente ; "#.0" perd le
+//     zero devant la virgule) -> "0.0" pour les mesures, stop affiche tel que
+//     saisi (deux decimales au plus) ;
+//   - seuils inverses (VERT au-dessus de ROUGE, vigilance au-dessus de danger) :
+//     plus de verdict, le tableau dit "Seuils inverses" ;
+//   - marche plat sur la periode (aucune plage) : dit "Marche plat", et non plus
+//     "Historique insuffisant" ;
+//   - chaque mesure disponible est affichee (la v0.1 mettait "--" partout des
+//     qu'une seule manquait) ;
+//   - en ORANGE, la cause dit quelle mesure retient le verdict (CHOP moyen, ATR
+//     en vigilance, ou les deux) a la place de "Conditions mixtes" ;
+//   - unite de temps lisible (1 min, 1 h...) a la place du code brut.
+// Ajoute, pour verifier le filtre sur l'historique :
+//   - CHOP, ATR/stop et verdict dans la fenetre de donnees, bougie par bougie ;
+//   - fond colore selon le verdict, option DECOCHEE par defaut ;
+//   - deux alertes (passage au ROUGE, passage au VERT), a la cloture seulement ;
+//   - taille et position du tableau (le tableau LOLO 2 / TENDANCE est lui aussi
+//     en haut a droite par defaut).
+// v0.3 : confirmation des ameliorations et plancher ATR/stop optionnel.
+// Toujours : un seul tableau, actualise a la cloture ; aucun request.security,
+// aucune boucle, aucun objet accumule. Par defaut, meme verdict que la v0.2
+// sur chaque bougie cloturee ; le verdict brut reste disponible separement.
+
+// --- PARAMETRES (positions 1 a 7 : celles de la v0.1) ---
+int chopLen = input.int(14, "CHOP - periode", minval = 2, group = "Marche")
+int atrLen = input.int(14, "ATR - periode", minval = 2, group = "Marche")
+float stopPts = input.float(20.0, "Stop de reference (points NAS)", minval = 0.1, step = 0.5, group = "Risque")
+float chopGreen = input.float(38.2, "CHOP favorable sous", minval = 0, maxval = 100, group = "Seuils TEST")
+float chopRed = input.float(61.8, "CHOP dangereux des", minval = 0, maxval = 100, group = "Seuils TEST")
+float atrOrange = input.float(0.70, "ATR / stop - vigilance des", minval = 0.1, step = 0.05, group = "Seuils TEST")
+float atrRed = input.float(1.00, "ATR / stop - danger des", minval = 0.1, step = 0.05, group = "Seuils TEST")
+
+// --- PARAMETRES AJOUTES EN v0.2 (toujours a la fin) ---
+string tableSizeInput = input.string("Moyen", "Taille", options = ["Petit", "Moyen", "Grand"], group = "Tableau", display = display.none)
+string tablePositionInput = input.string("Haut droite", "Position", options = ["Haut gauche", "Haut centre", "Haut droite", "Milieu gauche", "Milieu centre", "Milieu droite", "Bas gauche", "Bas centre", "Bas droite"], group = "Tableau", tooltip = "Le tableau LOLO 2 / TENDANCE est aussi en haut a droite par defaut : deplacer l'un des deux s'ils se recouvrent.", display = display.none)
+bool showBackground = input.bool(false, "Fond colore selon le verdict (a la cloture)", group = "Verification", tooltip = "Pour relire le filtre sur l'historique : chaque bougie prend la couleur de son verdict a sa cloture. La bougie en cours n'est pas coloree avant sa cloture. Decoche : rien n'est dessine.")
+
+// --- PARAMETRES AJOUTES EN v0.3 (apres tous les inputs existants) ---
+int confirmBars = input.int(1, "Clotures de confirmation avant d'ameliorer le verdict", minval = 1, maxval = 20, group = "Confirmation")
+float atrFloor = input.float(0.0, "ATR / stop minimum (0 = desactive)", minval = 0, step = 0.05, group = "Confirmation")
+
+// --- CALCULS SIMPLES, SUR CHAQUE BOUGIE (identiques a la v0.1) ---
+// CHOP = 100 * log10(somme des True Ranges / plage High-Low) / log10(N).
+float trSum = math.sum(ta.tr(true), chopLen)
+float highestPrice = ta.highest(high, chopLen)
+float lowestPrice = ta.lowest(low, chopLen)
+float priceRange = highestPrice - lowestPrice
+bool enoughBars = bar_index >= chopLen - 1
+float chop = enoughBars and priceRange > 0 and trSum > 0 ? 100.0 * math.log10(trSum / priceRange) / math.log10(chopLen) : na
+float atrPts = ta.atr(atrLen)
+float atrToStop = atrPts / stopPts
+
+// Seuils dans l'ordre : VERT <= ROUGE et vigilance <= danger. Sinon, pas de verdict.
+bool thresholdsOk = chopGreen <= chopRed and atrOrange <= atrRed
+bool ready = not na(chop) and not na(atrToStop)
+// Plage nulle sur toute la periode alors que l'historique suffit : marche plat.
+bool flatMarket = enoughBars and priceRange <= 0 and not na(atrToStop)
+bool highChop = ready and chop >= chopRed
+bool highAtr = ready and atrToStop >= atrRed
+bool blocked = highChop or highAtr
+bool favorable = ready and not blocked and chop < chopGreen and atrToStop < atrOrange
+// Pourquoi ORANGE : la ou les mesures qui retiennent le verdict.
+bool midChop = ready and not blocked and chop >= chopGreen
+bool midAtr = ready and not blocked and atrToStop >= atrOrange
+
+// Code du verdict : -1 indisponible, 0 rouge, 1 orange, 2 vert.
+int rawCode = not thresholdsOk or not ready ? -1 : blocked ? 0 : favorable ? 2 : 1
+string cause = not thresholdsOk ? "Seuils inverses" : not ready ? (flatMarket ? "Marche plat" : "Historique insuffisant") : highChop and highAtr ? "CHOP + ATR" : highChop ? "Marche hache" : highAtr ? "ATR trop eleve" : favorable ? "Contexte a examiner" : midChop and midAtr ? "CHOP + ATR moyens" : midChop ? "CHOP moyen" : "ATR en vigilance"
+if atrFloor > 0 and ready and rawCode == 2 and atrToStop < atrFloor
+    rawCode := 1
+    cause := "Marche trop calme"
+
+// Le comptage ne porte que sur des clotures consecutives meilleures que l'etat stable.
+var int stableCode = -1
+var int upCount = 0
+var int upMin = 2
+if barstate.isconfirmed
+    if rawCode == -1
+        stableCode := -1
+        upCount := 0
+    else if stableCode == -1
+        stableCode := rawCode
+        upCount := 0
+    else if rawCode < stableCode
+        stableCode := rawCode
+        upCount := 0
+    else if rawCode == stableCode
+        upCount := 0
+    else if rawCode > stableCode
+        upCount += 1
+        upMin := upCount == 1 ? rawCode : math.min(upMin, rawCode)
+        if upCount >= confirmBars
+            stableCode := upMin
+            upCount := 0
+
+if upCount > 0
+    cause := "Confirmation " + str.tostring(upCount) + "/" + str.tostring(confirmBars)
+string verdict = stableCode == -1 ? (not thresholdsOk ? "REGLAGES" : "DONNEES...") : stableCode == 0 ? "ROUGE - STOP" : stableCode == 2 ? "VERT - ETUDIER" : "ORANGE - ATTENDRE"
+color verdictColor = stableCode == -1 ? color.gray : stableCode == 0 ? color.rgb(150, 40, 50) : stableCode == 2 ? color.rgb(15, 105, 70) : color.rgb(160, 105, 20)
+color bgHeader = color.rgb(35, 42, 52)
+color bgCell = color.rgb(45, 51, 60)
+
+// Unite de temps lisible : 30 s, 1 min, 1 h, 10 ticks ; sinon le code TradingView (1D, 1W...).
+string tfLabel = timeframe.isseconds ? str.tostring(timeframe.multiplier) + " s" : timeframe.isminutes ? (timeframe.multiplier % 60 == 0 ? str.tostring(int(timeframe.multiplier / 60)) + " h" : str.tostring(timeframe.multiplier) + " min") : timeframe.isticks ? str.tostring(timeframe.multiplier) + " ticks" : timeframe.period
+
+// Taille : l'en-tete reste un cran plus petit que les lignes, comme en v0.1.
+string bodySize = tableSizeInput == "Petit" ? size.small : tableSizeInput == "Grand" ? size.large : size.normal
+string headSize = tableSizeInput == "Petit" ? size.tiny : tableSizeInput == "Grand" ? size.normal : size.small
+string tablePosition = switch tablePositionInput
+    "Haut gauche" => position.top_left
+    "Haut centre" => position.top_center
+    "Haut droite" => position.top_right
+    "Milieu gauche" => position.middle_left
+    "Milieu centre" => position.middle_center
+    "Milieu droite" => position.middle_right
+    "Bas gauche" => position.bottom_left
+    "Bas centre" => position.bottom_center
+    => position.bottom_right
+
+// --- UN SEUL TABLEAU : cree une fois et actualise a la cloture ---
+// Pas d'objets accumules, pas de request.security, pas de boucle, pas de recalcul intrabar du tableau.
+var table dashboard = table.new(tablePosition, 2, 6, frame_color = color.gray, frame_width = 1, border_width = 1)
+bool refresh = barstate.islastconfirmedhistory or (barstate.islast and barstate.isconfirmed)
+if refresh
+    table.cell(dashboard, 0, 0, "LOLO 2 / FILTRE", bgcolor = bgHeader, text_color = color.white, text_size = headSize)
+    table.cell(dashboard, 1, 0, "UT " + tfLabel, bgcolor = bgHeader, text_color = color.white, text_size = headSize)
+    table.cell(dashboard, 0, 1, "CHOP " + str.tostring(chopLen), bgcolor = bgCell, text_color = color.white, text_size = bodySize)
+    table.cell(dashboard, 1, 1, not na(chop) ? str.tostring(chop, "0.0") : "--", bgcolor = bgCell, text_color = color.white, text_size = bodySize)
+    table.cell(dashboard, 0, 2, "ATR " + str.tostring(atrLen), bgcolor = bgCell, text_color = color.white, text_size = bodySize)
+    table.cell(dashboard, 1, 2, not na(atrPts) ? str.tostring(atrPts, "0.0") + " pts" : "--", bgcolor = bgCell, text_color = color.white, text_size = bodySize)
+    table.cell(dashboard, 0, 3, "STOP REPERE", bgcolor = bgCell, text_color = color.white, text_size = bodySize)
+    table.cell(dashboard, 1, 3, str.tostring(stopPts, "0.##") + " pts", bgcolor = bgCell, text_color = color.white, text_size = bodySize)
+    table.cell(dashboard, 0, 4, "ATR / STOP", bgcolor = bgCell, text_color = color.white, text_size = bodySize)
+    table.cell(dashboard, 1, 4, not na(atrToStop) ? str.tostring(atrToStop * 100.0, "0.0") + " %" : "--", bgcolor = bgCell, text_color = color.white, text_size = bodySize)
+    table.cell(dashboard, 0, 5, cause, bgcolor = verdictColor, text_color = color.white, text_size = bodySize)
+    table.cell(dashboard, 1, 5, verdict, bgcolor = verdictColor, text_color = color.white, text_size = bodySize)
+
+// --- VERIFICATION SUR L'HISTORIQUE ---
+// Fenetre de donnees seulement : rien n'est trace sur le graphique, l'echelle des prix n'est pas touchee
+// (ne pas cocher ces lignes dans l'onglet Style : elles seraient tracees sur l'echelle des prix).
+// CHOP, ATR/stop et verdict brut sont provisoires intrabar ; le verdict confirme et le tableau attendent la cloture.
+plot(chop, "CHOP", color = color.gray, format = format.price, precision = 1, display = display.data_window)
+plot(atrToStop * 100.0, "ATR / stop (%)", color = color.gray, format = format.price, precision = 1, display = display.data_window)
+plot(stableCode, "Verdict (2 vert, 1 orange, 0 rouge, -1 indispo)", color = color.gray, format = format.price, precision = 0, display = display.data_window)
+
+// Fond optionnel : la couleur du verdict sur chaque bougie a sa cloture (jamais sur la bougie en cours).
+// Teintes franches, distinctes des couleurs sombres du tableau, lisibles sur fond clair ou sombre.
+color backgroundTint = stableCode == 0 ? color.rgb(242, 54, 69, 80) : stableCode == 2 ? color.rgb(8, 153, 129, 80) : color.rgb(255, 152, 0, 80)
+bgcolor(showBackground and barstate.isconfirmed and stableCode >= 0 ? backgroundTint : na, title = "Fond selon le verdict")
+
+// Alertes : a la cloture seulement, une fois par changement du verdict confirme.
+alertcondition(barstate.isconfirmed and stableCode == 0 and stableCode[1] != 0, "Passage au ROUGE", "L2 FILTRE : passage au ROUGE (CHOP ou ATR) {{ticker}} {{interval}}")
+alertcondition(barstate.isconfirmed and stableCode == 2 and stableCode[1] != 2, "Passage au VERT", "L2 FILTRE : passage au VERT {{ticker}} {{interval}}")
+
+plot(rawCode, "Verdict brut", color = color.gray, format = format.price, precision = 0, display = display.data_window)
