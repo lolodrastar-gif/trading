@@ -1,0 +1,191 @@
+//@version=6
+indicator("LOLO 2 - Jauge consensus technique (TEST v0.1)", "L2 JAUGE", overlay = true)
+
+// Inspire du tableau fourni par l'utilisateur. Adaptation NAS100 1 minute.
+// Les rubriques Analystes / Valorisation ne sont PAS simulees :
+// elles sont remplacees par DMI/ADX et Supertrend, calculables sur le prix.
+// Les 5 lectures de direction sont distinctes du veto de volatilite.
+// Un consensus technique n'est pas une prediction de profit ni un ordre.
+
+// --- Parametres ---
+string G_DIR = "1. Lectures de direction"
+int emaFastLen = input.int(21, "EMA rapide", minval = 2, group = G_DIR)
+int emaSlowLen = input.int(55, "EMA lente", minval = 3, group = G_DIR)
+int rsiLen = input.int(14, "RSI - periode", minval = 2, group = G_DIR)
+float rsiBuy = input.float(55.0, "RSI haussier au-dessus", minval = 1, maxval = 99, group = G_DIR)
+float rsiSell = input.float(45.0, "RSI baissier sous", minval = 1, maxval = 99, group = G_DIR)
+int dmiLen = input.int(14, "DMI - periode", minval = 2, group = G_DIR)
+int adxSmooth = input.int(14, "ADX - lissage", minval = 2, group = G_DIR)
+float adxMin = input.float(20.0, "ADX minimum pour DMI directionnel", minval = 1, group = G_DIR)
+int stAtrLen = input.int(10, "Supertrend ATR", minval = 2, group = G_DIR)
+float stFactor = input.float(3.0, "Supertrend facteur", minval = 0.1, step = 0.1, group = G_DIR)
+int rocLen = input.int(8, "Momentum ROC - periode", minval = 2, group = G_DIR)
+float rocLimit = input.float(0.05, "Momentum seuil (%)", minval = 0, step = 0.01, group = G_DIR)
+
+string G_SAFE = "2. Securite du marche (independante)"
+int chopLen = input.int(14, "CHOP - periode", minval = 2, group = G_SAFE)
+float chopCaution = input.float(38.2, "CHOP vigilance des", minval = 0, maxval = 100, group = G_SAFE)
+float chopDanger = input.float(61.8, "CHOP danger des", minval = 0, maxval = 100, group = G_SAFE)
+int atrLen = input.int(14, "ATR - periode", minval = 2, group = G_SAFE)
+float stopPts = input.float(20.0, "Stop repere (points NAS)", minval = 0.1, step = 0.5, group = G_SAFE)
+float atrCaution = input.float(0.70, "ATR / stop vigilance des", minval = 0.05, group = G_SAFE)
+float atrDanger = input.float(1.00, "ATR / stop danger des", minval = 0.05, group = G_SAFE)
+float shockCaution = input.float(0.75, "TR bougie / stop vigilance des", minval = 0.05, group = G_SAFE)
+float shockDanger = input.float(1.00, "TR bougie / stop danger des", minval = 0.05, group = G_SAFE)
+
+string G_VIS = "3. Affichage"
+string tablePos = input.string("Haut droite", "Position", options = ["Haut gauche", "Haut droite", "Bas gauche", "Bas droite"], group = G_VIS)
+string textSize = input.string("Moyen", "Taille", options = ["Petit", "Moyen", "Grand"], group = G_VIS)
+
+// --- Calculs sur toutes les bougies : valeurs standard Pine ---
+bool validChart = timeframe.isminutes and timeframe.multiplier == 1 and chart.is_standard
+bool validSettings = emaFastLen < emaSlowLen and rsiSell < rsiBuy and chopCaution < chopDanger and atrCaution < atrDanger and shockCaution < shockDanger
+
+float emaFast = ta.ema(close, emaFastLen)
+float emaSlow = ta.ema(close, emaSlowLen)
+float rsi = ta.rsi(close, rsiLen)
+[diPlus, diMinus, adx] = ta.dmi(dmiLen, adxSmooth)
+[superLine, superDir] = ta.supertrend(stFactor, stAtrLen)
+float roc = ta.roc(close, rocLen)
+
+float tr = ta.tr(true)
+float chopTrSum = math.sum(tr, chopLen)
+float chopRange = ta.highest(high, chopLen) - ta.lowest(low, chopLen)
+float chop = bar_index >= chopLen - 1 and chopRange > 0 and chopTrSum > 0 ? 100.0 * math.log10(chopTrSum / chopRange) / math.log10(chopLen) : na
+float atr = ta.atr(atrLen)
+float atrRatio = atr / stopPts
+float trRatio = tr / stopPts
+
+bool dirReady = bar_index >= emaSlowLen and not na(emaSlow) and not na(rsi) and not na(diPlus) and not na(diMinus) and not na(adx) and not na(superDir) and not na(roc)
+bool riskReady = not na(chop) and not na(atrRatio)
+bool allReady = validChart and validSettings and dirReady and riskReady
+
+// Une lecture vaut +1 (hausse), 0 (neutre) ou -1 (baisse).
+int maSignal = emaFast > emaSlow and close > emaFast ? 1 : emaFast < emaSlow and close < emaFast ? -1 : 0
+int oscSignal = rsi > rsiBuy ? 1 : rsi < rsiSell ? -1 : 0
+int dmiSignal = adx >= adxMin ? (diPlus > diMinus ? 1 : diMinus > diPlus ? -1 : 0) : 0
+int stSignal = superDir < 0 ? 1 : superDir > 0 ? -1 : 0
+int momSignal = roc > rocLimit ? 1 : roc < -rocLimit ? -1 : 0
+
+int bulls = (maSignal == 1 ? 1 : 0) + (oscSignal == 1 ? 1 : 0) + (dmiSignal == 1 ? 1 : 0) + (stSignal == 1 ? 1 : 0) + (momSignal == 1 ? 1 : 0)
+int bears = (maSignal == -1 ? 1 : 0) + (oscSignal == -1 ? 1 : 0) + (dmiSignal == -1 ? 1 : 0) + (stSignal == -1 ? 1 : 0) + (momSignal == -1 ? 1 : 0)
+
+// -2 vente forte, -1 vente, 0 neutre, 1 achat, 2 achat fort.
+// Seuil fort strict : 4 lectures sur 5 au minimum.
+int consensusRaw = bulls >= 4 and bears <= 1 ? 2 : bears >= 4 and bulls <= 1 ? -2 : bulls >= 3 and bulls > bears ? 1 : bears >= 3 and bears > bulls ? -1 : 0
+
+// Securite independante : une lecture haussiere ne compense jamais un danger.
+int riskRaw = not riskReady ? -1 : chop >= chopDanger or atrRatio >= atrDanger or trRatio >= shockDanger ? 0 : chop >= chopCaution or atrRatio >= atrCaution or trRatio >= shockCaution ? 1 : 2
+
+// Enregistre les lectures UNIQUEMENT a la cloture pour un panneau stable.
+var int lastMa = 0
+var int lastOsc = 0
+var int lastDmi = 0
+var int lastSt = 0
+var int lastMom = 0
+var int lastBulls = 0
+var int lastBears = 0
+var int lastConsensus = 9
+var int lastRisk = -1
+if barstate.isconfirmed
+    lastMa := maSignal
+    lastOsc := oscSignal
+    lastDmi := dmiSignal
+    lastSt := stSignal
+    lastMom := momSignal
+    lastBulls := bulls
+    lastBears := bears
+    lastConsensus := allReady ? consensusRaw : 9
+    lastRisk := validChart and validSettings and riskReady ? riskRaw : -1
+
+// --- Fonctions d'affichage (aucun appel externe ni nouvel objet) ---
+f_signalText(int value) => value == 1 ? "ACHAT" : value == -1 ? "VENTE" : "NEUTRE"
+f_signalColor(int value) => value == 1 ? color.rgb(40, 130, 212) : value == -1 ? color.rgb(210, 55, 73) : color.rgb(105, 111, 120)
+
+color dark = color.rgb(23, 26, 35)
+color heading = color.rgb(35, 42, 53)
+color muted = color.rgb(149, 155, 164)
+color white = color.white
+color red = color.rgb(210, 55, 73)
+color orange = color.rgb(226, 134, 43)
+color blue = color.rgb(47, 119, 235)
+color lightBlue = color.rgb(63, 156, 242)
+color grey = color.rgb(113, 119, 131)
+string bodySize = textSize == "Petit" ? size.small : textSize == "Grand" ? size.large : size.normal
+string bigSize = textSize == "Petit" ? size.normal : textSize == "Grand" ? size.huge : size.large
+string pos = tablePos == "Haut gauche" ? position.top_left : tablePos == "Bas gauche" ? position.bottom_left : tablePos == "Bas droite" ? position.bottom_right : position.top_right
+
+var table panel = table.new(pos, 9, 15, bgcolor = dark, frame_color = heading, frame_width = 1, border_width = 0)
+if barstate.isfirst
+    table.merge_cells(panel, 0, 0, 8, 0)
+    table.merge_cells(panel, 0, 5, 8, 5)
+    table.merge_cells(panel, 0, 6, 8, 6)
+    table.merge_cells(panel, 0, 7, 5, 7)
+    table.merge_cells(panel, 6, 7, 8, 7)
+    for r = 8 to 12
+        table.merge_cells(panel, 0, r, 5, r)
+        table.merge_cells(panel, 6, r, 8, r)
+    table.merge_cells(panel, 0, 13, 5, 13)
+    table.merge_cells(panel, 6, 13, 8, 13)
+    table.merge_cells(panel, 0, 14, 8, 14)
+
+// Le plein rafraichissement se fait seulement a la derniere cloture.
+bool refresh = barstate.islastconfirmedhistory or (barstate.islast and barstate.isconfirmed)
+if refresh
+    bool available = lastConsensus != 9
+    string decision = not available ? "INDISPONIBLE" : lastConsensus == 2 ? "ACHAT FORT" : lastConsensus == 1 ? "ACHAT" : lastConsensus == -2 ? "VENTE FORTE" : lastConsensus == -1 ? "VENTE" : "NEUTRE"
+    color decisionColor = not available ? grey : lastConsensus >= 1 ? blue : lastConsensus <= -1 ? red : grey
+    string needle = not available ? "·" : lastConsensus == -2 ? "↙" : lastConsensus == -1 ? "↖" : lastConsensus == 0 ? "↑" : lastConsensus == 1 ? "↗" : "↘"
+    table.cell(panel, 0, 0, "LOLO 2  /  CONSENSUS TECHNIQUE  •  1 MIN", bgcolor = heading, text_color = white, text_size = bodySize)
+    // Arc en 9 segments. La fleche centrale est une approximation de jauge,
+    // car une table Pine ne dessine pas un cadran vectoriel.
+    table.cell(panel, 3, 1, "●", text_color = orange, text_size = bigSize)
+    table.cell(panel, 4, 1, "●", text_color = grey, text_size = bigSize)
+    table.cell(panel, 5, 1, "●", text_color = lightBlue, text_size = bigSize)
+    table.cell(panel, 2, 2, "●", text_color = orange, text_size = bigSize)
+    table.cell(panel, 6, 2, "●", text_color = lightBlue, text_size = bigSize)
+    table.cell(panel, 1, 3, "●", text_color = red, text_size = bigSize)
+    table.cell(panel, 7, 3, "●", text_color = blue, text_size = bigSize)
+    table.cell(panel, 0, 4, "●", text_color = red, text_size = bigSize)
+    table.cell(panel, 8, 4, "●", text_color = blue, text_size = bigSize)
+    table.cell(panel, 4, 3, needle, text_color = decisionColor, text_size = size.huge)
+    table.cell(panel, 4, 4, "●", text_color = muted, text_size = bodySize)
+    table.cell(panel, 0, 5, decision, bgcolor = dark, text_color = decisionColor, text_size = bigSize)
+    string counts = available ? str.tostring(lastBulls) + " haussiers   •   " + str.tostring(lastBears) + " baissiers   •   " + str.tostring(5 - lastBulls - lastBears) + " neutres" : "En attente de bougies exploitables"
+    table.cell(panel, 0, 6, counts, bgcolor = dark, text_color = muted, text_size = bodySize)
+    table.cell(panel, 0, 7, "LECTURE TECHNIQUE", bgcolor = heading, text_color = white, text_size = bodySize)
+    table.cell(panel, 6, 7, "SIGNAL", bgcolor = heading, text_color = white, text_size = bodySize)
+    table.cell(panel, 0, 8, "Moyennes mobiles (EMA)", text_color = white, text_size = bodySize)
+    table.cell(panel, 6, 8, available ? f_signalText(lastMa) : "--", bgcolor = available ? f_signalColor(lastMa) : grey, text_color = white, text_size = bodySize)
+    table.cell(panel, 0, 9, "Oscillateur (RSI)", text_color = white, text_size = bodySize)
+    table.cell(panel, 6, 9, available ? f_signalText(lastOsc) : "--", bgcolor = available ? f_signalColor(lastOsc) : grey, text_color = white, text_size = bodySize)
+    table.cell(panel, 0, 10, "Tendance (DMI / ADX)", text_color = white, text_size = bodySize)
+    table.cell(panel, 6, 10, available ? f_signalText(lastDmi) : "--", bgcolor = available ? f_signalColor(lastDmi) : grey, text_color = white, text_size = bodySize)
+    table.cell(panel, 0, 11, "Suiveur (Supertrend)", text_color = white, text_size = bodySize)
+    table.cell(panel, 6, 11, available ? f_signalText(lastSt) : "--", bgcolor = available ? f_signalColor(lastSt) : grey, text_color = white, text_size = bodySize)
+    table.cell(panel, 0, 12, "Momentum (ROC)", text_color = white, text_size = bodySize)
+    table.cell(panel, 6, 12, available ? f_signalText(lastMom) : "--", bgcolor = available ? f_signalColor(lastMom) : grey, text_color = white, text_size = bodySize)
+    string riskLabel = not validChart ? "UT 1 MIN STANDARD" : not validSettings ? "REGLAGES INVALIDES" : lastRisk == -1 ? "CALCUL EN COURS" : lastRisk == 0 ? "ROUGE - PAS DE TRADE" : lastRisk == 1 ? "ORANGE - PRUDENCE" : "VERT - CONTEXTE OK"
+    color riskColor = lastRisk == 0 ? red : lastRisk == 1 ? orange : lastRisk == 2 ? color.rgb(26, 130, 88) : grey
+    table.cell(panel, 0, 13, "SECURITE CHOP / ATR / CHOC", bgcolor = heading, text_color = white, text_size = bodySize)
+    table.cell(panel, 6, 13, riskLabel, bgcolor = riskColor, text_color = white, text_size = bodySize)
+    table.cell(panel, 0, 14, "Lectures confirmees a la cloture • Risque distinct", bgcolor = dark, text_color = muted, text_size = size.small)
+
+// Seul le risque de choc change pendant la minute ouverte.
+// Le consensus reste celui de la derniere bougie cloturee.
+bool liveDanger = validChart and validSettings and trRatio >= shockDanger
+bool liveWarn = validChart and validSettings and trRatio >= shockCaution
+if barstate.islast and barstate.isrealtime and not barstate.isconfirmed
+    if liveDanger or (liveWarn and lastRisk == 2)
+        table.cell_set_text(panel, 6, 13, liveDanger ? "CHOC LIVE - STOP" : "VIGILANCE LIVE")
+        table.cell_set_bgcolor(panel, 6, 13, liveDanger ? red : orange)
+
+// Alertes uniquement sur la cloture pour les signaux ; choc possible intrabar.
+bool buyAllowed = lastRisk == 2 and lastConsensus >= 1
+bool sellAllowed = lastRisk == 2 and lastConsensus <= -1
+alertcondition(barstate.isconfirmed and buyAllowed and not buyAllowed[1], title = "L2 consensus ACHAT, contexte vert", message = "L2 : consensus ACHAT et contexte favorable sur {{ticker}} {{interval}}")
+alertcondition(barstate.isconfirmed and sellAllowed and not sellAllowed[1], title = "L2 consensus VENTE, contexte vert", message = "L2 : consensus VENTE et contexte favorable sur {{ticker}} {{interval}}")
+alertcondition(barstate.isrealtime and not barstate.isconfirmed and liveDanger, title = "L2 CHOC LIVE", message = "L2 : choc TR / stop sur {{ticker}} {{interval}}")
+
+plot(lastConsensus == 9 ? na : lastConsensus, "Consensus confirme (-2 a +2)", display = display.data_window)
+plot(lastRisk == -1 ? na : lastRisk, "Securite confirmee (0 rouge, 1 orange, 2 vert)", display = display.data_window)
