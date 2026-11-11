@@ -20,8 +20,10 @@ la machine de confirmation est celle du filtre v0.3. Deux petits defauts de fonc
 
 - Fonctionne uniquement en 1 minute exacte, bougies standard. En secondes : "UT 1 MIN REQUISE".
 - Espacement : une fleche qui tombe dans l'intervalle est supprimee, pas retardee (sens oppose compris).
-- Le commentaire sur le rollback des cellules du tableau n'est pas documente dans le manuel. Le code reste
-  correct dans les deux cas : il reecrit les cellules a chaque tick et tout le tableau a la cloture.
+- Le commentaire sur le rollback des cellules du tableau est exact (correction du 11/11 : le manuel le documente
+  dans "Execution model", pas dans la page des tableaux : les changements faits sur la bougie ouverte a un objet
+  reference par une variable `var` sont annules avant chaque tick). Le code reecrit les cellules a chaque tick
+  et tout le tableau a la cloture : il est correct.
 - Ligne de statut : une trentaine de valeurs s'y affichent (cosmetique, `display = display.none`).
 - En-tete "NAS / 1 MIN" affiche quel que soit le symbole.
 - Apres "INDISPONIBLE", le premier verdict valide est pris sans confirmation (debut d'historique).

@@ -13,6 +13,10 @@ indicator("LOLO 2 - Jauge consensus technique (TEST v0.2)", "L2 JAUGE", overlay 
 //   - confirmation optionnelle de la securite (reglage ajoute a la fin, 1 par
 //     defaut = securite identique a la v0.1 sur chaque bougie cloturee) ;
 //   - securite brute ajoutee dans la fenetre de donnees.
+//
+// ALERTES : une alerte deja creee garde le script et les reglages du jour de sa
+// creation. Apres le passage a la v0.2, puis apres tout changement de reglage
+// (clotures de confirmation comprises), supprimer l'alerte et la recreer.
 
 // --- Parametres ---
 string G_DIR = "1. Lectures de direction"
@@ -46,7 +50,7 @@ string textSize = input.string("Moyen", "Taille", options = ["Petit", "Moyen", "
 
 // --- Ajoute en v0.2 (toujours apres tous les reglages existants) ---
 string G_CONF = "4. Confirmation"
-int confirmBars = input.int(1, "Clotures de confirmation avant d'ameliorer la securite", minval = 1, maxval = 20, group = G_CONF, tooltip = "1 = comme la v0.1 : la securite suit chaque cloture. 2 ou 3 : il faut autant de clotures meilleures de suite pour quitter le ROUGE ou passer au VERT. Une degradation reste immediate.", display = display.none)
+int confirmBars = input.int(1, "Clotures de confirmation avant d'ameliorer la securite", minval = 1, maxval = 20, group = G_CONF, tooltip = "1 = comme la v0.1 : la securite suit chaque cloture. 2 ou 3 : il faut au moins autant de clotures meilleures de suite pour quitter le ROUGE ou passer au VERT (le compteur s'affiche dans le panneau). Une degradation reste immediate.", display = display.none)
 
 // --- Calculs sur toutes les bougies : valeurs standard Pine ---
 bool validChart = timeframe.isminutes and timeframe.multiplier == 1 and chart.is_standard
