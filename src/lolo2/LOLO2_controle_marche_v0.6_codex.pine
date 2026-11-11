@@ -1,0 +1,238 @@
+//@version=6
+indicator("LOLO 2 - Controle Marche DMI/ST (TEST v0.6)", "L2 CONTROLE v0.6", overlay = true)
+
+// LOLO 2 : NAS100, bougies STANDARD 1 minute.
+// Contexte et fleches d'etude uniquement : aucune execution d'ordres.
+// 4 votes STABILITE : CHOP, ATR / stop, ADX, Kaufman ER.
+// DIRECTION HORS SCORE : RSI, EMA 21/55, +DI/-DI et Supertrend.
+// Les fleches sont CONFIRMEES a la cloture, jamais anticipees.
+// CHOC LIVE : alerte provisoire intrabar, sans changer l'historique confirme.
+// Seuils experimentaux. Verifier les signaux sur historique + demo.
+
+// ---- 1. STABILITE : les 4 votes ----
+int chopLen = input.int(14, "CHOP - periode", minval = 2, group = "1. Stabilite")
+float chopOk = input.float(38.2, "CHOP : vote sous", minval = 0, maxval = 100, group = "1. Stabilite")
+float chopRed = input.float(61.8, "CHOP : veto des", minval = 0, maxval = 100, group = "1. Stabilite")
+int atrLen = input.int(14, "ATR - periode", minval = 2, group = "1. Stabilite")
+float stopPts = input.float(20.0, "Stop repere NAS (points)", minval = 0.1, step = 0.5, group = "1. Stabilite")
+float atrOk = input.float(0.70, "ATR / stop : vote sous", minval = 0.05, step = 0.05, group = "1. Stabilite")
+float atrRed = input.float(1.00, "ATR / stop : veto des", minval = 0.05, step = 0.05, group = "1. Stabilite")
+int dmiLen = input.int(14, "DMI - periode", minval = 2, group = "1. Stabilite")
+int adxSmooth = input.int(14, "ADX - lissage", minval = 2, group = "1. Stabilite")
+float adxOk = input.float(25.0, "ADX : vote des", minval = 1, maxval = 100, group = "1. Stabilite")
+int erLen = input.int(10, "Kaufman ER - periode", minval = 2, maxval = 100, group = "1. Stabilite")
+float erOk = input.float(0.35, "ER : vote des", minval = 0, maxval = 1, step = 0.05, group = "1. Stabilite")
+
+// ---- 2. SECURITE ----
+bool useShock = input.bool(true, "Activer choc en direct", group = "2. Securite")
+float shockWarn = input.float(0.75, "TR 1m / stop : vigilance des", minval = 0.05, step = 0.05, group = "2. Securite")
+float shockRed = input.float(1.00, "TR 1m / stop : rouge des", minval = 0.05, step = 0.05, group = "2. Securite")
+int shockHold = input.int(2, "Pause apres choc (bougies)", minval = 0, maxval = 10, group = "2. Securite")
+int confirmBars = input.int(2, "Clotures pour ameliorer le verdict", minval = 1, maxval = 10, group = "2. Securite")
+
+// ---- 3. DIRECTION : jamais de vote de stabilite ----
+int rsiLen = input.int(14, "RSI - periode", minval = 2, group = "3. Direction")
+float rsiBuy = input.float(55.0, "RSI : achat au-dessus", minval = 1, maxval = 99, group = "3. Direction")
+float rsiSell = input.float(45.0, "RSI : vente en dessous", minval = 1, maxval = 99, group = "3. Direction")
+int emaFastLen = input.int(21, "EMA rapide", minval = 2, group = "3. Direction")
+int emaSlowLen = input.int(55, "EMA lente", minval = 3, group = "3. Direction")
+float diGap = input.float(3.0, "DMI : ecart minimum entre +DI et -DI", minval = 0, step = 0.5, group = "3. Direction")
+int stLen = input.int(10, "Supertrend - ATR", minval = 2, group = "3. Direction")
+float stFactor = input.float(3.0, "Supertrend - facteur", minval = 0.1, step = 0.1, group = "3. Direction")
+
+// ---- 4. SIGNAUX / PRESENTATION ----
+bool showSignals = input.bool(true, "Fleches ACHAT / VENTE sur le graphique", group = "4. Signaux")
+int minSignalGap = input.int(5, "Espacement minimum entre fleches (bougies)", minval = 0, maxval = 60, group = "4. Signaux")
+bool showST = input.bool(true, "Afficher ligne Supertrend", group = "4. Signaux")
+bool showBg = input.bool(false, "Colorer les bougies confirmees selon le verdict", group = "4. Signaux")
+string tableSize = input.string("Moyen", "Taille du tableau", options = ["Petit", "Moyen", "Grand"], group = "4. Signaux")
+string tablePos = input.string("Haut droite", "Position du tableau", options = ["Haut gauche", "Haut droite", "Bas gauche", "Bas droite"], group = "4. Signaux")
+
+// ---- VALIDATION DU CONTEXTE ----
+bool oneMinute = timeframe.isminutes and timeframe.multiplier == 1
+bool standardOHLC = chart.is_standard
+bool tfOk = oneMinute and standardOHLC
+bool stabilitySettingsOk = chopOk < chopRed and atrOk < atrRed
+bool shockSettingsOk = not useShock or shockWarn < shockRed
+bool directionSettingsOk = rsiSell < rsiBuy and emaFastLen < emaSlowLen
+bool settingsOk = stabilitySettingsOk and shockSettingsOk
+
+// ---- CALCULS : series simples, aucune requete d'autre UT ----
+float tr = ta.tr(true)
+float trSum = math.sum(tr, chopLen)
+float highestPrice = ta.highest(high, chopLen)
+float lowestPrice = ta.lowest(low, chopLen)
+float rangePrice = highestPrice - lowestPrice
+float chop = bar_index >= chopLen - 1 and rangePrice > 0 and trSum > 0 ? 100.0 * math.log10(trSum / rangePrice) / math.log10(chopLen) : na
+float atrPts = ta.atr(atrLen)
+float atrRatio = atrPts / stopPts
+float trRatio = tr / stopPts
+[diPlus, diMinus, adx] = ta.dmi(dmiLen, adxSmooth)
+float erPath = math.sum(math.abs(ta.change(close)), erLen)
+float erNet = math.abs(ta.change(close, erLen))
+float er = bar_index >= erLen and not na(erPath) ? (erPath > 0 ? erNet / erPath : 0.0) : na
+float rsi = ta.rsi(close, rsiLen)
+float emaFast = ta.ema(close, emaFastLen)
+float emaSlow = ta.ema(close, emaSlowLen)
+[stLine, stDir] = ta.supertrend(stFactor, stLen)
+
+bool flat = bar_index >= chopLen - 1 and rangePrice <= 0
+bool stableReady = not na(chop) and not na(atrRatio) and not na(adx) and not na(er)
+bool scoreReady = tfOk and settingsOk and stableReady
+bool dirReady = tfOk and directionSettingsOk and bar_index >= emaSlowLen - 1 and not na(rsi) and not na(diPlus) and not na(diMinus) and not na(stDir) and not na(emaFast) and not na(emaSlow)
+
+// ---- STABILITE : exactement 4 votes, sans RSI ni +DI/-DI ni Supertrend ----
+bool voteChop = scoreReady and chop < chopOk
+bool voteAtr = scoreReady and atrRatio < atrOk
+bool voteAdx = scoreReady and adx >= adxOk
+bool voteEr = scoreReady and er >= erOk
+int score = (voteChop ? 1 : 0) + (voteAtr ? 1 : 0) + (voteAdx ? 1 : 0) + (voteEr ? 1 : 0)
+bool vetoChop = scoreReady and chop >= chopRed
+bool vetoAtr = scoreReady and atrRatio >= atrRed
+bool cautionChop = scoreReady and chop >= chopOk
+bool cautionAtr = scoreReady and atrRatio >= atrOk
+
+// ---- CHOC : detection intrabar independante du prechauffage du score ----
+bool shockReady = tfOk and shockSettingsOk and useShock and not na(trRatio)
+bool shockLive = shockReady and trRatio >= shockRed
+bool shockWarnNow = shockReady and trRatio >= shockWarn
+var int lastShockBar = na
+if barstate.isconfirmed and shockLive
+    lastShockBar := bar_index
+bool shockPause = shockReady and not na(lastShockBar) and bar_index > lastShockBar and bar_index - lastShockBar <= shockHold
+
+// Codes : -1 non disponible, 0 rouge, 1 orange, 2 vert.
+int rawCode = not tfOk ? -1 : shockLive or shockPause ? 0 : not settingsOk ? -1 : flat ? 0 : not stableReady ? -1 : vetoAtr or vetoChop or score <= 1 ? 0 : shockWarnNow or cautionAtr or cautionChop or score == 2 ? 1 : 2
+string rawReason = not oneMinute ? "UT 1 MIN REQUISE" : not standardOHLC ? "BOUGIES STANDARD" : shockLive ? "CHOC EN DIRECT" : shockPause ? "PAUSE APRES CHOC" : not settingsOk ? "SEUILS INVALIDES" : flat ? "MARCHE PLAT" : not stableReady ? "HISTORIQUE INCOMPLET" : vetoAtr ? "ATR TROP ELEVE" : vetoChop ? "MARCHE HACHE" : score <= 1 ? "SCORE INSUFFISANT" : shockWarnNow ? "BOUGIE AGITEE" : cautionAtr ? "ATR EN VIGILANCE" : cautionChop ? "CHOP INTERMEDIAIRE" : score == 2 ? "CONDITIONS MIXTES" : "CONTEXTE FAVORABLE"
+
+// Degradation a la cloture, amelioration apres N clotures.
+var int stableCode = -1
+var int upCount = 0
+var int upMin = 2
+var string lastReason = "HISTORIQUE INCOMPLET"
+if barstate.isconfirmed
+    if rawCode == -1
+        stableCode := -1
+        upCount := 0
+    else if stableCode == -1
+        stableCode := rawCode
+        upCount := 0
+    else if rawCode < stableCode
+        stableCode := rawCode
+        upCount := 0
+    else if rawCode == stableCode
+        upCount := 0
+    else
+        upCount += 1
+        upMin := upCount == 1 ? rawCode : math.min(upMin, rawCode)
+        if upCount >= confirmBars
+            stableCode := upMin
+            upCount := 0
+    lastReason := stableCode >= 0 and rawCode > stableCode ? "CONFIRMATION " + str.tostring(upCount) + "/" + str.tostring(confirmBars) : rawReason
+
+// ---- DIRECTION : RSI + EMA + DMI, totalement separee du score ----
+bool emaBull = dirReady and emaFast > emaSlow and close > emaFast
+bool emaBear = dirReady and emaFast < emaSlow and close < emaFast
+bool rsiBull = dirReady and rsi > rsiBuy
+bool rsiBear = dirReady and rsi < rsiSell
+bool dmiBull = dirReady and diPlus > diMinus + diGap
+bool dmiBear = dirReady and diMinus > diPlus + diGap
+int bias = not dirReady ? 0 : emaBull and rsiBull and dmiBull ? 1 : emaBear and rsiBear and dmiBear ? -1 : 0
+bool stBull = dirReady and stDir < 0
+bool stBear = dirReady and stDir > 0
+
+// Fleches : premier alignement apres une cloture, ST inclus, CONTEXTE VERT exige.
+// L'espacement evite les fleches repetees, mais ne bloque pas des ordres sur cTrader.
+bool qualifiedBuy = tfOk and scoreReady and dirReady and stableCode == 2 and bias == 1 and stBull
+bool qualifiedSell = tfOk and scoreReady and dirReady and stableCode == 2 and bias == -1 and stBear
+var int lastSignalBar = na
+bool signalSpacingOk = na(lastSignalBar) or bar_index - lastSignalBar >= minSignalGap
+bool buySignal = barstate.isconfirmed and showSignals and qualifiedBuy and not qualifiedBuy[1] and signalSpacingOk
+bool sellSignal = barstate.isconfirmed and showSignals and qualifiedSell and not qualifiedSell[1] and signalSpacingOk
+if buySignal or sellSignal
+    lastSignalBar := bar_index
+
+plot(showST and tfOk and barstate.isconfirmed and stDir < 0 ? stLine : na, "Supertrend haussier", color = color.lime, linewidth = 2, style = plot.style_linebr)
+plot(showST and tfOk and barstate.isconfirmed and stDir > 0 ? stLine : na, "Supertrend baissier", color = color.red, linewidth = 2, style = plot.style_linebr)
+plotshape(buySignal, title = "L2 ACHAT confirme", text = "ACHAT", style = shape.labelup, location = location.belowbar, color = color.rgb(21, 113, 77), textcolor = color.white, size = size.tiny)
+plotshape(sellSignal, title = "L2 VENTE confirmee", text = "VENTE", style = shape.labeldown, location = location.abovebar, color = color.rgb(146, 42, 53), textcolor = color.white, size = size.tiny)
+
+// ---- TABLEAU COMPACT ET UNIQUE : cree une fois, affiche les clotures ----
+color cRed = color.rgb(146, 42, 53)
+color cOrange = color.rgb(164, 110, 24)
+color cGreen = color.rgb(21, 113, 77)
+color cBlue = color.rgb(51, 97, 157)
+color cGrey = color.rgb(79, 87, 99)
+color cHead = color.rgb(32, 40, 51)
+color cCell = color.rgb(45, 53, 65)
+string sizeBody = tableSize == "Petit" ? size.small : tableSize == "Grand" ? size.large : size.normal
+string sizeHead = tableSize == "Petit" ? size.tiny : tableSize == "Grand" ? size.normal : size.small
+string pos = tablePos == "Haut gauche" ? position.top_left : tablePos == "Bas gauche" ? position.bottom_left : tablePos == "Bas droite" ? position.bottom_right : position.top_right
+var table dash = table.new(pos, 2, 11, frame_color = cGrey, frame_width = 1, border_width = 1)
+color verdictColor = stableCode == 0 ? cRed : stableCode == 1 ? cOrange : stableCode == 2 ? cGreen : cGrey
+string verdictText = stableCode == 0 ? "ROUGE / STOP" : stableCode == 1 ? "ORANGE / ATTENDRE" : stableCode == 2 ? "VERT / A ETUDIER" : "INDISPONIBLE"
+string biasText = not tfOk ? "UT INVALIDE" : not directionSettingsOk ? "SEUILS INVALIDES" : not dirReady ? "HISTORIQUE..." : bias == 1 ? "ACHAT" : bias == -1 ? "VENTE" : "NEUTRE"
+color biasColor = bias == 1 ? cGreen : bias == -1 ? cBlue : cGrey
+string dmiText = dirReady ? "+" + str.tostring(diPlus, "0.0") + " / -" + str.tostring(diMinus, "0.0") : "--"
+string stText = dirReady ? stBull ? "HAUSSIER" : stBear ? "BAISSIER" : "NEUTRE" : "--"
+string shockText = not useShock ? "OFF" : not tfOk ? "--" : str.tostring(trRatio * 100.0, "0.0") + "%" + (shockLive ? " / CHOC" : shockPause ? " / PAUSE" : "")
+
+bool refreshFull = barstate.islastconfirmedhistory or (barstate.islast and barstate.isconfirmed)
+if refreshFull
+    table.cell(dash, 0, 0, "LOLO 2 / CONTROLE", bgcolor = cHead, text_color = color.white, text_size = sizeHead)
+    table.cell(dash, 1, 0, tfOk ? "NAS / 1 MIN" : "UT / TYPE INVALIDE", bgcolor = cHead, text_color = color.white, text_size = sizeHead)
+    table.cell(dash, 0, 1, lastReason, bgcolor = verdictColor, text_color = color.white, text_size = sizeBody)
+    table.cell(dash, 1, 1, verdictText, bgcolor = verdictColor, text_color = color.white, text_size = sizeBody)
+    table.cell(dash, 0, 2, "STABILITE / 4", bgcolor = cHead, text_color = color.white, text_size = sizeHead)
+    table.cell(dash, 1, 2, scoreReady ? str.tostring(score) + "/4" : "--/4", bgcolor = cHead, text_color = color.white, text_size = sizeHead)
+    table.cell(dash, 0, 3, "CHOP", bgcolor = cCell, text_color = color.white, text_size = sizeBody)
+    table.cell(dash, 1, 3, not na(chop) ? str.tostring(chop, "0.0") + (scoreReady ? (voteChop ? "  +1" : "  +0") : "") : "--", bgcolor = voteChop ? cGreen : cCell, text_color = color.white, text_size = sizeBody)
+    table.cell(dash, 0, 4, "ATR / STOP " + str.tostring(stopPts, "0.##"), bgcolor = cCell, text_color = color.white, text_size = sizeBody)
+    table.cell(dash, 1, 4, not na(atrRatio) ? str.tostring(atrRatio * 100.0, "0.0") + "%" + (scoreReady ? (voteAtr ? "  +1" : "  +0") : "") : "--", bgcolor = voteAtr ? cGreen : cCell, text_color = color.white, text_size = sizeBody)
+    table.cell(dash, 0, 5, "ADX", bgcolor = cCell, text_color = color.white, text_size = sizeBody)
+    table.cell(dash, 1, 5, not na(adx) ? str.tostring(adx, "0.0") + (scoreReady ? (voteAdx ? "  +1" : "  +0") : "") : "--", bgcolor = voteAdx ? cGreen : cCell, text_color = color.white, text_size = sizeBody)
+    table.cell(dash, 0, 6, "KAUFMAN ER", bgcolor = cCell, text_color = color.white, text_size = sizeBody)
+    table.cell(dash, 1, 6, not na(er) ? str.tostring(er, "0.00") + (scoreReady ? (voteEr ? "  +1" : "  +0") : "") : "--", bgcolor = voteEr ? cGreen : cCell, text_color = color.white, text_size = sizeBody)
+    table.cell(dash, 0, 7, "CHOC 1M / STOP", bgcolor = cCell, text_color = color.white, text_size = sizeBody)
+    table.cell(dash, 1, 7, shockText, bgcolor = shockLive or shockPause ? cRed : shockWarnNow ? cOrange : cCell, text_color = color.white, text_size = sizeBody)
+    table.cell(dash, 0, 8, "DIRECTION (hors score)", bgcolor = biasColor, text_color = color.white, text_size = sizeBody)
+    table.cell(dash, 1, 8, biasText, bgcolor = biasColor, text_color = color.white, text_size = sizeBody)
+    table.cell(dash, 0, 9, "RSI / DMI", bgcolor = cCell, text_color = color.white, text_size = sizeBody)
+    table.cell(dash, 1, 9, (not na(rsi) ? str.tostring(rsi, "0.0") : "--") + "  |  " + dmiText, bgcolor = cCell, text_color = color.white, text_size = sizeBody)
+    table.cell(dash, 0, 10, "SUPERTREND " + str.tostring(stLen) + "/" + str.tostring(stFactor, "0.0"), bgcolor = cCell, text_color = color.white, text_size = sizeBody)
+    table.cell(dash, 1, 10, stText, bgcolor = cCell, text_color = color.white, text_size = sizeBody)
+
+// LIVE : seul le choc est intrabar. Le score, les flèches et la direction restent confirmes.
+// La re-ecriture des cellules en direct respecte le rollback Pine.
+if barstate.islast and barstate.isrealtime and not barstate.isconfirmed
+    bool liveRed = shockLive or shockPause
+    bool liveOrange = not liveRed and shockWarnNow and stableCode == 2
+    int liveCode = not tfOk ? -1 : liveRed ? 0 : liveOrange ? 1 : stableCode
+    color liveColor = liveCode == 0 ? cRed : liveCode == 1 ? cOrange : liveCode == 2 ? cGreen : cGrey
+    string liveText = liveCode == -1 ? "INDISPONIBLE" : liveRed ? "ROUGE LIVE / STOP" : liveOrange ? "ORANGE LIVE" : verdictText
+    string liveReason = not tfOk ? "UT 1 MIN STANDARD" : liveRed ? (shockLive ? "CHOC 1M EN DIRECT" : "PAUSE APRES CHOC") : liveOrange ? "BOUGIE AGITEE" : lastReason
+    table.cell_set_text(dash, 0, 1, liveReason)
+    table.cell_set_text(dash, 1, 1, liveText)
+    table.cell_set_bgcolor(dash, 0, 1, liveColor)
+    table.cell_set_bgcolor(dash, 1, 1, liveColor)
+    table.cell_set_text(dash, 1, 7, shockText)
+    table.cell_set_bgcolor(dash, 1, 7, shockLive or shockPause ? cRed : shockWarnNow ? cOrange : cCell)
+
+// HISTORIQUE : visible dans la fenetre de donnees, pas sur l'echelle de prix.
+plot(scoreReady ? score : na, "Stabilite (0-4)", display = display.data_window)
+plot(stableCode, "Verdict confirme : -1/0/1/2", display = display.data_window)
+plot(dirReady ? bias : na, "Direction : -1/0/1", display = display.data_window)
+plot(diPlus, "+DI", display = display.data_window)
+plot(diMinus, "-DI", display = display.data_window)
+color tint = stableCode == 0 ? color.new(color.red, 84) : stableCode == 1 ? color.new(color.orange, 84) : color.new(color.teal, 84)
+bgcolor(showBg and barstate.isconfirmed and stableCode >= 0 ? tint : na, title = "Fond du regime confirme")
+
+// ALERTES : a creer dans TradingView (pas d'execution automatique).
+bool signalRougeConfirme = barstate.isconfirmed and stableCode == 0 and stableCode[1] != 0
+bool signalVertConfirme = barstate.isconfirmed and stableCode == 2 and stableCode[1] != 2
+bool signalChocLive = barstate.isrealtime and not barstate.isconfirmed and shockLive
+alertcondition(signalRougeConfirme, title = "L2 ROUGE confirme", message = "L2 ROUGE confirme - {{ticker}} {{interval}}")
+alertcondition(signalVertConfirme, title = "L2 VERT confirme", message = "L2 VERT confirme - {{ticker}} {{interval}}")
+alertcondition(signalChocLive, title = "L2 CHOC ROUGE LIVE", message = "L2 CHOC LIVE - {{ticker}} {{interval}}")
+alertcondition(buySignal, title = "L2 ACHAT confirme", message = "L2 ACHAT confirme - {{ticker}} {{interval}}")
+alertcondition(sellSignal, title = "L2 VENTE confirmee", message = "L2 VENTE confirmee - {{ticker}} {{interval}}")
