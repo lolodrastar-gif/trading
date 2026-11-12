@@ -1,0 +1,331 @@
+//@version=6
+// ATR Pro — Lolo 2.0, candidat 15m exact / graphique 30m (24 octobre 2026).
+// OPT FIX :
+// - quantiles/Bollinger natif + HTF harmonises avec le mode LTF : fenetre PRECEDENTE ;
+// - mode natif non calcule quand un HTF/LTF est utilise ;
+// - quantiles/Bollinger calcules seulement lorsqu'ils sont necessaires ;
+// - logique ATR, rang, regimes, rendu et alertes conservee.
+//
+// BASE : ATR Pro corrige 5. ENTREE, RENDU ET MODES NATIF/HTF CONSERVES.
+//
+// CORRECTION LTF : les statistiques sont maintenant calculees dans le contexte
+// des bougies 15m elles-memes. Toutes les bougies 15m alimentent les statistiques,
+// et le graphique 30m affiche la derniere mesure 15m disponible.
+// Le rang et les bandes comparent la mesure courante aux bougies 15m PRECEDENTES.
+// Fenetres completes : regimeLookback valeurs precedentes / bbLength precedentes.
+// Les hauts/bas de stabilite incluent la mesure courante, comme l'original.
+// Pas de tableau d'historique ni de tri repetitif dans le contexte 30m.
+//
+// Sur une bougie 30m encore ouverte, valeurs PROVISOIRES (rollback normal Pine).
+// Alertes autorisees seulement apres confirmation de la bougie du graphique.
+// En absence de donnees LTF : conservation de la derniere valeur confirmee,
+// pas de remplacement par l'ATR du graphique, pas d'alerte.
+// Attention : flux LTF / retrocorrections de donnees peuvent encore repeindre.
+// Version de TEST : non compilee sur TradingView, performance non mesuree.
+// Comparer avec l'ancienne dans un panneau separe avant adoption.
+indicator("ATR Pro — Lolo 2 (15m exact) — OPT FIX", shorttitle = "ATR Pro L2 OPT", overlay = false, precision = 4)
+const string G_ATR   = "1 — ATR"
+const string G_UNIT  = "2 — Unite"
+const string G_REG   = "3 — Regime et quantiles"
+const string G_STYLE = "4 — Rendu"
+const string G_LABEL = "5 — Etiquettes de prix"
+const string G_COL   = "6 — Couleurs"
+const string U_TICK  = "Ticks (pas de cotation)"
+const string U_PIP   = "Pips (forex)"
+const string U_POINT = "Points (prix)"
+const string U_PCT   = "Pourcentage du prix (ATR %)"
+const int MAX_WINDOW = 5000
+int    atrLength = input.int(14, "Longueur de l'ATR", minval = 1, group = G_ATR)
+string atrType   = input.string("RMA", "Moyenne de l'ATR", options = ["RMA", "SMA", "EMA", "WMA"], group = G_ATR)
+string atrTimeframe = input.timeframe("", "Unite de temps de l'ATR", group = G_ATR, tooltip = "Vide = unite du graphique. Superieure : ATR et statistiques de la derniere bougie close. Inferieure : ATR, rang et quantiles calcules sur TOUTES les bougies de cette unite ; dernier echantillon affiche par bougie du graphique. En temps reel : valeur provisoire avant la cloture du graphique. Ignoree sur un graphique en ticks.")
+bool   includeGaps = input.bool(true, "Inclure les gaps de seance", group = G_ATR)
+string unitMode = input.string(U_PCT, "Unite affichee", options = [U_PCT, U_TICK, U_PIP, U_POINT], group = G_UNIT)
+float  pipOverride = input.float(0.0, "Taille d'un pip (0 = auto)", minval = 0.0, step = 0.00001, group = G_UNIT)
+bool   roundValue = input.bool(true, "Arrondir a l'unite", group = G_UNIT)
+int    regimeLookback = input.int(500, "Fenetre des quantiles (bougies)", minval = 50, maxval = MAX_WINDOW, group = G_REG)
+string bandSource = input.string("Quantiles (recommande)", "Nature des bandes", options = ["Quantiles (recommande)", "Bollinger (comme l'original)", "Aucune"], group = G_REG)
+int    bbLength = input.int(34, "Longueur des bandes de Bollinger", minval = 2, maxval = MAX_WINDOW, group = G_REG)
+float  bbMult = input.float(2.0, "Ecarts-types", minval = 0.1, maxval = 50.0, step = 0.1, group = G_REG)
+int    lowPercentile = input.int(25, "Seuil de compression (centile)", minval = 1, maxval = 49, group = G_REG)
+int    calmPercentile = input.int(50, "Seuil calme / normal (centile)", minval = 2, maxval = 98, group = G_REG)
+int    highPercentileInput = input.int(80, "Seuil de forte volatilite (centile)", minval = 51, maxval = 99, group = G_REG)
+float  lowVariationPct = input.float(0.0, "Regime indisponible si l'ATR varie de moins de % sur la fenetre (0 = off)", minval = 0.0, maxval = 50.0, step = 0.5, group = G_REG, tooltip = "Filtre optionnel. La serie constante est toujours traitee a part, quelle que soit cette valeur.")
+// Seuils remis dans l'ordre, puis separes d'au moins un pas de rang : avec une fenetre de 50, le rang avance par 2.
+int rankStep = math.max(1, math.ceil(100.0 / regimeLookback))
+int lowSorted = math.min(lowPercentile, math.min(calmPercentile, highPercentileInput))
+int highSorted = math.max(lowPercentile, math.max(calmPercentile, highPercentileInput))
+int midSorted = lowPercentile + calmPercentile + highPercentileInput - lowSorted - highSorted
+int lowLevel = math.min(lowSorted, 99 - 2 * rankStep)
+int midLevel = math.min(math.max(midSorted, lowLevel + rankStep), 99 - rankStep)
+int highLevel = math.min(math.max(highSorted, midLevel + rankStep), 99)
+bool thresholdsChanged = lowLevel != lowPercentile or midLevel != calmPercentile or highLevel != highPercentileInput
+string displayScale = input.string("% de la normale (100 % = habituel)", "Echelle d'affichage", options = ["% de la normale (100 % = habituel)", "Rang centile 0–100", "ATR (valeur)"], group = G_STYLE)
+string plotStyle = input.string("Aire remplie", "Style de l'ATR", options = ["Aire remplie", "Colonnes", "Ligne"], group = G_STYLE)
+int    fillTransparency = input.int(55, "Transparence du remplissage", minval = 0, maxval = 100, group = G_STYLE)
+bool   colorByRegime = input.bool(true, "Colorer selon le regime", group = G_STYLE)
+color  singleColor = input.color(#FF9800, "Couleur unique", group = G_STYLE)
+int    lineWidth = input.int(2, "Epaisseur", minval = 1, maxval = 4, group = G_STYLE)
+bool  showAtrLabel = input.bool(true, "Etiquette de l'ATR", group = G_LABEL)
+bool  customAtrLabel = input.bool(false, "Couleur libre pour l'etiquette de l'ATR", group = G_LABEL)
+color atrLabelColor = input.color(#FFFFFF, "Couleur de l'etiquette de l'ATR", group = G_LABEL)
+bool  showUpperLabel = input.bool(true, "Etiquette Upper", group = G_LABEL)
+bool  showMiddleLabel = input.bool(true, "Etiquette Middle", group = G_LABEL)
+bool  showLowerLabel = input.bool(true, "Etiquette Lower", group = G_LABEL)
+color compressColor = input.color(#2962FF, "Compression", group = G_COL)
+color calmColor     = input.color(#26A69A, "Calme", group = G_COL)
+color normalColor   = input.color(#FF9800, "Normal", group = G_COL)
+color highColor     = input.color(#F23645, "Forte volatilite", group = G_COL)
+color warmupColor   = input.color(#4A4E57, "Prechauffage ou regime indisponible", group = G_COL)
+color upperColor  = input.color(#787B86, "Upper", group = G_COL)
+color middleColor = input.color(#FF9800, "Middle", group = G_COL)
+color lowerColor  = input.color(#787B86, "Lower", group = G_COL)
+int   bandTransparency = input.int(20, "Transparence des bandes", minval = 0, maxval = 100, group = G_COL)
+int   bandWidth = input.int(1, "Epaisseur des bandes", minval = 1, maxval = 4, group = G_COL)
+// Calculer uniquement les statistiques réellement nécessaires.
+// Ces booléens dépendent uniquement des inputs et restent constants pendant l'exécution.
+bool needQuantileBands = bandSource == "Quantiles (recommande)"
+bool needBollingerBands = bandSource == "Bollinger (comme l'original)"
+bool needMedianReference = needQuantileBands or displayScale == "% de la normale (100 % = habituel)"
+float tickSize = syminfo.mintick
+bool  fractional = tickSize == 0.00001 or tickSize == 0.001
+float pipSize = pipOverride > 0.0 ? pipOverride : (fractional ? tickSize * 10.0 : tickSize)
+bool  percentMode = unitMode == U_PCT
+float unitDivisor = unitMode == U_POINT ? 1.0 : unitMode == U_PIP ? pipSize : tickSize
+movingAverage(float source, simple int length, simple string kind) =>
+    switch kind
+        "RMA" => ta.rma(source, length)
+        "SMA" => ta.sma(source, length)
+        "EMA" => ta.ema(source, length)
+        "WMA" => ta.wma(source, length)
+atrInPrice(simple int length, simple string kind, simple bool withGaps) =>
+    movingAverage(withGaps ? ta.tr(true) : high - low, length, kind)
+// ATR dans l'unite choisie, puis toutes ses statistiques, calculees sur les bougies du contexte d'appel.
+atrStats(simple int length, simple string kind, simple bool withGaps, simple bool pct, simple float divisor, simple int lookback, simple int lo, simple int mid, simple int hi, simple int bbLen, simple float bbK, simple bool needQ, simple bool needBB, simple bool needMedian) =>
+    float atrP = atrInPrice(length, kind, withGaps)
+    float unitS = pct ? close / 100.0 : divisor
+    float raw = unitS > 0.0 ? atrP / unitS : na
+    // Le rang conserve exactement la logique d'origine.
+    float r = ta.percentrank(raw, lookback)
+    // CORRECTION : les seuils de comparaison sont construits sur les bougies
+    // PRECEDENTES, comme dans le mode LTF. La mesure courante n'entre donc pas
+    // dans ses propres quantiles/Bollinger.
+    float p1 = needQ ? ta.percentile_linear_interpolation(raw[1], lookback, lo) : na
+    float p2 = needMedian ? ta.percentile_linear_interpolation(raw[1], lookback, mid) : na
+    float p3 = needQ ? ta.percentile_linear_interpolation(raw[1], lookback, hi) : na
+    // Les hauts/bas de stabilité incluent toujours la mesure courante,
+    // conformément au comportement d'origine et au commentaire d'en-tête.
+    float wh = ta.highest(raw, lookback)
+    float wl = ta.lowest(raw, lookback)
+    // Ne calculer Bollinger que si ce mode est réellement demandé.
+    float bb = needBB ? ta.sma(raw[1], bbLen) : na
+    float bd = needBB ? bbK * ta.stdev(raw[1], bbLen) : na
+    [atrP, raw, r, p1, p2, p3, wh, wl, bb, bd]
+// Derniere bougie CLOSE de l'unite HTF demandee, sans repeint.
+atrStatsLag(simple int length, simple string kind, simple bool withGaps, simple bool pct, simple float divisor, simple int lookback, simple int lo, simple int mid, simple int hi, simple int bbLen, simple float bbK, simple bool needQ, simple bool needBB, simple bool needMedian) =>
+    [atrP, raw, r, p1, p2, p3, wh, wl, bb, bd] = atrStats(length, kind, withGaps, pct, divisor, lookback, lo, mid, hi, bbLen, bbK, needQ, needBB, needMedian)
+    [atrP[1], raw[1], r[1], p1[1], p2[1], p3[1], wh[1], wl[1], bb[1], bd[1]]
+// Version pour les unites INFERIEURES : statistiques calculees dans le contexte
+// natif demande. Les quantiles/Bollinger utilisent les N mesures PRECEDENTES.
+atrStatsLower(simple int length, simple string kind, simple bool withGaps, simple bool pct, simple float divisor, simple int lookback, simple int lo, simple int mid, simple int hi, simple int bbLen, simple float bbK, simple bool needQ, simple bool needBB, simple bool needMedian) =>
+    float atrP = atrInPrice(length, kind, withGaps)
+    float unitS = pct ? close / 100.0 : divisor
+    float raw = unitS > 0.0 ? atrP / unitS : na
+    float r = ta.percentrank(raw, lookback)
+    float p1 = needQ ? ta.percentile_linear_interpolation(raw[1], lookback, lo) : na
+    float p2 = needMedian ? ta.percentile_linear_interpolation(raw[1], lookback, mid) : na
+    float p3 = needQ ? ta.percentile_linear_interpolation(raw[1], lookback, hi) : na
+    float wh = ta.highest(raw[1], lookback)
+    float wl = ta.lowest(raw[1], lookback)
+    float bb = needBB ? ta.sma(raw[1], bbLen) : na
+    float bd = needBB ? bbK * ta.stdev(raw[1], bbLen) : na
+    float nSeen = ta.cum(not na(raw) ? 1.0 : 0.0)
+    [atrP, raw, r, p1, p2, p3, wh, wl, bb, bd, nSeen]
+// Routage des unites de temps
+bool tickChart = timeframe.isticks
+int chartSeconds = tickChart ? 0 : timeframe.in_seconds()
+int askedSeconds = atrTimeframe == "" or tickChart ? chartSeconds : timeframe.in_seconds(atrTimeframe)
+bool useLowerTimeframe = not tickChart and atrTimeframe != "" and askedSeconds > 0 and askedSeconds < chartSeconds
+bool useHigherTimeframe = not tickChart and atrTimeframe != "" and askedSeconds > chartSeconds
+bool timeframeIgnored = tickChart and atrTimeframe != ""
+// Unite du graphique : calculee uniquement si elle est reellement utilisee.
+// Le choix de timeframe est stable pendant l'execution, donc la branche active
+// appelle les fonctions ta.* sur chaque barre de ce mode.
+float cAtr = na
+float cRaw = na
+float cRank = na
+float cQ1 = na
+float cQ2 = na
+float cQ3 = na
+float cWh = na
+float cWl = na
+float cBb = na
+float cBd = na
+if not useHigherTimeframe and not useLowerTimeframe
+    [a, raw, r, p1, p2, p3, wh, wl, bb, bd] = atrStats(atrLength, atrType, includeGaps, percentMode, unitDivisor, regimeLookback, lowLevel, midLevel, highLevel, bbLength, bbMult, needQuantileBands, needBollingerBands, needMedianReference)
+    cAtr := a
+    cRaw := raw
+    cRank := r
+    cQ1 := p1
+    cQ2 := p2
+    cQ3 := p3
+    cWh := wh
+    cWl := wl
+    cBb := bb
+    cBd := bd
+// Unite superieure : statistiques calculees sur ses propres bougies, dans la requete (dynamique : seulement si demandee)
+float hAtr = na
+float hRaw = na
+float hRank = na
+float hQ1 = na
+float hQ2 = na
+float hQ3 = na
+float hWh = na
+float hWl = na
+float hBb = na
+float hBd = na
+if useHigherTimeframe
+    [a, raw, r, p1, p2, p3, wh, wl, bb, bd] = request.security(syminfo.tickerid, atrTimeframe, atrStatsLag(atrLength, atrType, includeGaps, percentMode, unitDivisor, regimeLookback, lowLevel, midLevel, highLevel, bbLength, bbMult, needQuantileBands, needBollingerBands, needMedianReference), lookahead = barmerge.lookahead_on)
+    hAtr := a
+    hRaw := raw
+    hRank := r
+    hQ1 := p1
+    hQ2 := p2
+    hQ3 := p3
+    hWh := wh
+    hWl := wl
+    hBb := bb
+    hBd := bd
+// UNITE INFERIEURE — une seule requete contenant 11 series deja calculees
+// sur chaque bougie native 15m. La 30m n'effectue plus de tri de mesures.
+// Elle ne peut afficher qu'UNE valeur par bougie 30m : le dernier 15m recu.
+// Les series LTF evoluent pendant la bougie ouverte ; aucune alerte avant
+// que la 30m elle-meme soit confirmee.
+var float ltfAtrHeld = na
+var float lRawHeld = na
+var float lRank = na
+var float lQ1 = na
+var float lQ2 = na
+var float lQ3 = na
+var float lWh = na
+var float lWl = na
+var float lBb = na
+var float lBd = na
+var int lCount = 0
+var int ltfStaleBars = 0
+var int ltfLastValidRegime = -1
+bool ltfMissingNow = false
+bool ltfValidNow = false
+int ltfCount = 0
+int lCapacity = math.max(regimeLookback, bbLength)
+if useLowerTimeframe
+    [laAtr, laRaw, laRank, laQ1, laQ2, laQ3, laWh, laWl, laBb, laBd, laSeen] = request.security_lower_tf(syminfo.tickerid, atrTimeframe, atrStatsLower(atrLength, atrType, includeGaps, percentMode, unitDivisor, regimeLookback, lowLevel, midLevel, highLevel, bbLength, bbMult, needQuantileBands, needBollingerBands, needMedianReference))
+    ltfCount := array.size(laAtr)
+    if ltfCount > 0
+        int last = ltfCount - 1
+        float aLast = array.get(laAtr, last)
+        float rawLast = array.get(laRaw, last)
+        ltfValidNow := not na(aLast) and not na(rawLast)
+        if ltfValidNow
+            // Les valeurs de la bougie 30m ouverte sont provisoires : 'var'
+            // revient a la derniere cloture au prochain tick (rollback Pine).
+            ltfAtrHeld := aLast
+            lRawHeld := rawLast
+            lRank := array.get(laRank, last)
+            lQ1 := array.get(laQ1, last)
+            lQ2 := array.get(laQ2, last)
+            lQ3 := array.get(laQ3, last)
+            float prevHi = array.get(laWh, last)
+            float prevLo = array.get(laWl, last)
+            lWh := not na(prevHi) ? math.max(prevHi, rawLast) : na
+            lWl := not na(prevLo) ? math.min(prevLo, rawLast) : na
+            lBb := array.get(laBb, last)
+            lBd := array.get(laBd, last)
+            float seen = array.get(laSeen, last)
+            if not na(seen)
+                lCount := int(math.min(float(lCapacity), math.max(0.0, seen - 1.0)))
+            ltfStaleBars := 0
+    if not ltfValidNow
+        ltfMissingNow := true
+        if barstate.isconfirmed
+            ltfStaleBars += 1
+// En cas de manque, tout le snapshot conserve la derniere cloture valide.
+// Alertes bloquees tant que la derniere mesure LTF n'est pas disponible.
+int ltfStaleShown = ltfStaleBars + (ltfMissingNow and not barstate.isconfirmed ? 1 : 0)
+bool ltfStale = useLowerTimeframe and (ltfMissingNow or ltfStaleBars > 0)
+bool lReadyBase = useLowerTimeframe and not na(lRank) and not na(lWh) and not na(lWl)
+bool lQuantilesReady = not needQuantileBands or (not na(lQ1) and not na(lQ2) and not na(lQ3))
+bool lMedianReady = not needMedianReference or not na(lQ2)
+bool lBollingerReady = not needBollingerBands or (not na(lBb) and not na(lBd))
+bool lReady = lReadyBase and lQuantilesReady and lMedianReady and lBollingerReady
+float lRawSeries = useLowerTimeframe ? lRawHeld : na
+// Selection du mode
+float atrPrice = useHigherTimeframe ? hAtr : useLowerTimeframe ? ltfAtrHeld : cAtr
+float atrRaw = useHigherTimeframe ? hRaw : useLowerTimeframe ? lRawSeries : cRaw
+float rankRaw = useHigherTimeframe ? hRank : useLowerTimeframe ? lRank : cRank
+float q25 = useHigherTimeframe ? hQ1 : useLowerTimeframe ? lQ1 : cQ1
+float q50 = useHigherTimeframe ? hQ2 : useLowerTimeframe ? lQ2 : cQ2
+float q75 = useHigherTimeframe ? hQ3 : useLowerTimeframe ? lQ3 : cQ3
+float winHi = useHigherTimeframe ? hWh : useLowerTimeframe ? lWh : cWh
+float winLo = useHigherTimeframe ? hWl : useLowerTimeframe ? lWl : cWl
+float bbBasis = useHigherTimeframe ? hBb : useLowerTimeframe ? lBb : cBb
+float bbDev = useHigherTimeframe ? hBd : useLowerTimeframe ? lBd : cBd
+bool unitReady = percentMode ? close > 0.0 : not na(unitDivisor) and unitDivisor > 0.0
+// Serie constante : rang indisponible. Faible variation : filtre optionnel distinct.
+bool constantWindow = na(winHi) or winHi <= 0.0 or winHi - winLo <= winHi * 1e-7
+bool lowVariation = lowVariationPct > 0.0 and not na(winHi) and winHi > 0.0 and (winHi - winLo) / winHi * 100.0 < lowVariationPct
+float rank = constantWindow or lowVariation ? na : rankRaw
+bool useQuantiles = needQuantileBands
+bool useBollinger = needBollingerBands
+bool noBands = not useQuantiles and not useBollinger
+float upperBand = useQuantiles ? q75 : useBollinger ? bbBasis + bbDev : na
+float middleBand = useQuantiles ? q50 : useBollinger ? bbBasis : na
+float lowerBand = useQuantiles ? q25 : useBollinger ? math.max(bbBasis - bbDev, 0.0) : na
+roundForDisplay(float value) =>
+    na(value) ? na : (roundValue and not percentMode ? math.round(value) : value)
+float atrValue = roundForDisplay(atrRaw)
+float upperShown = roundForDisplay(upperBand)
+float middleShown = roundForDisplay(middleBand)
+float lowerShown = roundForDisplay(lowerBand)
+bool rankScale = displayScale == "Rang centile 0–100"
+bool relativeScale = displayScale == "% de la normale (100 % = habituel)"
+bool relativeReady = relativeScale and not na(q50) and q50 > 0.0
+float relativeValue = relativeReady and not na(atrRaw) ? atrRaw / q50 * 100.0 : na
+float relativeUpper = relativeReady and not na(upperBand) ? upperBand / q50 * 100.0 : na
+float relativeMiddle = relativeReady and not na(middleBand) ? middleBand / q50 * 100.0 : na
+float relativeLower = relativeReady and not na(lowerBand) ? lowerBand / q50 * 100.0 : na
+float shownValue = relativeScale ? relativeValue : rankScale ? rank : atrValue
+float shownUpper = noBands ? na : relativeScale ? relativeUpper : rankScale ? float(highLevel) : upperShown
+float shownMiddle = noBands ? na : relativeScale ? relativeMiddle : rankScale ? float(midLevel) : middleShown
+float shownLower = noBands ? na : relativeScale ? relativeLower : rankScale ? float(lowLevel) : lowerShown
+int regime = na(rank) ? -1 : rank >= highLevel ? 3 : rank >= midLevel ? 2 : rank >= lowLevel ? 1 : 0
+color regimeColor = regime == 3 ? highColor : regime == 2 ? normalColor : regime == 1 ? calmColor : regime == 0 ? compressColor : warmupColor
+color atrColor = colorByRegime ? regimeColor : singleColor
+plot(shownUpper, "Upper", color = color.new(upperColor, bandTransparency), linewidth = bandWidth, display = showUpperLabel ? display.all : display.pane + display.status_line + display.data_window)
+plot(shownMiddle, "Middle", color = color.new(middleColor, bandTransparency), linewidth = bandWidth, display = showMiddleLabel ? display.all : display.pane + display.status_line + display.data_window)
+plot(shownLower, "Lower", color = color.new(lowerColor, bandTransparency), linewidth = bandWidth, display = showLowerLabel ? display.all : display.pane + display.status_line + display.data_window)
+plot(plotStyle == "Colonnes" ? shownValue : na, "ATR (colonnes)", color = color.new(atrColor, fillTransparency), style = plot.style_columns, display = display.pane + display.status_line + display.data_window)
+plot(plotStyle == "Aire remplie" ? shownValue : na, "ATR (aire)", color = color.new(atrColor, fillTransparency), style = plot.style_area, display = display.pane + display.status_line + display.data_window)
+plot(shownValue, "ATR", color = atrColor, linewidth = lineWidth, display = showAtrLabel and not customAtrLabel ? display.all : display.pane + display.status_line + display.data_window)
+plot(showAtrLabel and customAtrLabel ? shownValue : na, "ATR — etiquette", color = atrLabelColor, display = display.price_scale)
+var table warn = table.new(position.bottom_center, 1, 1)
+if barstate.islast
+    string message = not unitReady ? "Unite indisponible pour ce symbole : choisir Pourcentage ou Points, ou renseigner la taille d'un pip." : timeframeIgnored ? "Graphique en ticks : l'unite de temps de l'ATR est ignoree." : ltfStale ? "Intrabougies absentes (" + str.tostring(ltfStaleShown) + " bougie(s)) : derniere mesure valide affichee, statistiques figees, alertes bloquees." : useLowerTimeframe and not lReady ? "Prechauffage 15m : " + str.tostring(lCount) + " / " + str.tostring(regimeLookback) + " mesures precedentes (ou serie incomplete), regime indisponible, alertes bloquees." : constantWindow ? "ATR constant sur la fenetre : regime indisponible." : lowVariation ? "ATR a varie de moins de " + str.tostring(lowVariationPct, "#.#") + " % sur la fenetre : regime indisponible (filtre optionnel)." : relativeScale and not na(q50) and q50 <= 0.0 ? "Reference centrale nulle : echelle relative indisponible. Choisir ATR (valeur) ou Rang centile." : thresholdsChanged ? "Seuils ajustes (ordre et pas de rang " + str.tostring(rankStep) + ") : " + str.tostring(lowLevel) + " / " + str.tostring(midLevel) + " / " + str.tostring(highLevel) + "." : ""
+    table.cell(warn, 0, 0, message, text_color = highColor, text_size = size.small)
+color invisible = #00000000
+plot(rank, "Rang centile (%)", color = invisible, precision = 1, display = display.data_window)
+plot(float(regime), "Regime : -1 indisponible, 0 compression, 1 calme, 2 normal, 3 forte volatilite", color = invisible, format = format.price, precision = 0, display = display.data_window)
+plot(atrValue, "ATR dans l'unite choisie", color = invisible, display = display.data_window)
+plot(na(q50) or q50 <= 0.0 ? na : atrRaw / q50 * 100.0, "ATR en % de la normale", color = invisible, display = display.data_window)
+plot(atrPrice, "ATR en prix", color = invisible, display = display.data_window)
+plot(q50, "Quantile central de l'ATR", color = invisible, display = display.data_window)
+plot(useLowerTimeframe ? float(lCount) : na, "Mesures 15m valides precedentes (compteur plafonne)", color = invisible, format = format.price, precision = 0, display = display.data_window)
+plot(useLowerTimeframe ? float(ltfCount) : na, "Intrabougies recues sur cette bougie", color = invisible, format = format.price, precision = 0, display = display.data_window)
+plot(useLowerTimeframe ? float(ltfStaleShown) : na, "Bougies sans intrabougie (unite inferieure, bougie en cours comprise)", color = invisible, format = format.price, precision = 0, display = display.data_window)
+plot(useHigherTimeframe ? askedSeconds * regimeLookback / 3600.0 : useLowerTimeframe ? askedSeconds * regimeLookback / 3600.0 : tickChart ? na : chartSeconds * regimeLookback / 3600.0, "Fenetre des quantiles (heures de marche)", color = invisible, format = format.price, precision = 1, display = display.data_window)
+bool alertsOk = barstate.isconfirmed and not ltfStale and (not useLowerTimeframe or (ltfValidNow and lReady))
+int previousRegime = useLowerTimeframe ? ltfLastValidRegime : nz(regime[1], -1)
+alertcondition(alertsOk and regime == 3 and previousRegime != 3, "Entree en forte volatilite", "ATR entre dans le regime de forte volatilite")
+alertcondition(alertsOk and regime == 0 and previousRegime != 0, "Entree en compression", "ATR entre dans le regime de compression")
+// Mise a jour apres le calcul des conditions : les bougies sans mesure valide ne changent jamais cette reference.
+if useLowerTimeframe and ltfValidNow and barstate.isconfirmed
+    ltfLastValidRegime := regime
