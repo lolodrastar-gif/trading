@@ -1,0 +1,543 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0
+// BTM - Trend Cockpit  —  v8.1 fix 1 (multi-asset trend dashboard panel: directional confirmation only, no trade signals)
+//
+// A fixed dashboard panel on the price chart — crisp at any zoom, timeframe or market, never squashed by
+// weekends or session gaps. Rows, like a car's instrument cluster:
+//   MOVING AVG · ADX / DMI · MACD · SUPERTREND · ICHIMOKU – LED bar meters showing how far each score is from neutral,
+//                        lit in the state colour (green bullish, red bearish). Amber = neutral state: the bar
+//                        can still be long, and ▲ / ▼ after the value shows which way it leans
+//   STEEPNESS          – centre-zero LED bar: lights left for a bearish slope, right for a bullish one
+//                        (linear-regression slope over 50 bars in ATR units; 100% = top ~5% of trends for the asset class)
+//   AGREEMENT          – five lights, one per indicator, plus the count (e.g. 4/5 BEAR)
+//   TIMEFRAMES         – seven lights for 1m / 3m / 5m / 15m / 30m / 1h / 4h, plus the consensus
+//   VOLUME             – mirrored rising bricks: left = selling, right = buying (adds up to 100%), faded when volume
+//                        is low, bright when it is high. Range-based where a symbol has no volume.
+//                        SELL / BUY = volume of the intrabars that closed down / up. On a chart at or below the
+//                        intrabar timeframe the split is only where each candle closed in its range: DOWN / UP.
+// Candles: grey when ranging (weak ADX + flat steepness); high-volume candles white on dark charts / near-black on light.
+// Multi-asset: auto-detects INDICES / FOREX / METALS / CRYPTO with steepness presets calibrated on real data.
+// Default is LIVE (readings move with the forming candle; closed candles never change). "Confirmed bars only"
+// makes everything change only on candle close.
+// Alerts always use closed candles, in LIVE mode too. Create them with "Once per bar": no delay, and never on
+// an unfinished candle. "Once per bar close" also works but can come one candle later.
+//
+// v8.1 fix 1 (15/11): corrections only. Same gauges, formulas, colours and default settings as v8.1.
+//   Timeframes: seconds, minutes, hours, D / W / M and tick charts (tick charts: to be confirmed on screen).
+//     - the header and the lights are labelled correctly on every timeframe (30S, 90m, 1M, 10T);
+//     - a light below the chart timeframe now reads the last intrabar of a closed candle (v8.1 never read it),
+//       and never an intrabar that runs past the candle (a timeframe that does not divide the chart's);
+//     - nothing is asked of timeframe.in_seconds() on a tick chart.
+//   Labels: ICHIMOKU neutral reads MIXED (v8.1 wrote IN CLOUD with price outside the cloud); the footer reads
+//     NOT RANGING (v8.1 wrote TRENDING for everything that was not ranging); a neutral gauge shows which way
+//     it leans; a tie reads "=" (v8.1 showed ▲); the ADX and steepness numbers no longer round across their
+//     thresholds; the split reads DOWN / UP when it is only the close position; a live activity reading is
+//     marked "forming" because it compares a part of a candle with whole candles.
+//   Alerts: computed on closed candles in every mode, with the timeframe in the message.
+//   Bugs: with low thresholds the bullish side no longer wins against a bearish majority; Span A = Span B is
+//     neutral, not bearish; a candle without volume is never "high volume"; numeric inputs have minimums.
+//   Load: the gauges are no longer computed a second time when the indicator timeframe is blank. Unused code removed.
+//   Left as designed: Supertrend bar = distance to its line (full on the flip candle), steepness presets and
+//     flat zone, MACD bar step at zero, single colour for grey / white candles, asset detection, colours.
+
+//@version=6
+indicator("BTM - Trend Cockpit (v8.1 fix 1)", shorttitle = "BTM Cockpit fix1", overlay = true)
+
+// Steepness presets: ATRs of 50-bar regression travel at the 95th percentile, measured on real data
+// (indices: S&P 500 / Nasdaq 100 / FTSE 100 · forex: EURUSD / GBPJPY / USDJPY / AUDUSD · metals: XAUUSD · crypto: BTCUSD)
+SC_INDICES = 11.5
+SC_FOREX   = 9.5
+SC_METALS  = 10.0
+SC_CRYPTO  = 9.5
+
+// ───────────────────────────── Inputs ──────────────────────────────
+confOnly = input.bool(false, "Confirmed bars only (no live movement)", group = "General",
+     tooltip = "ON: everything updates only when a candle closes, so nothing moves or flips mid-candle. OFF: dials and colours move live while the current candle forms.")
+indTf  = input.timeframe("", "Indicator timeframe (blank = chart)", group = "General",
+     tooltip = "Gauges 1 to 5, the steepness gauge, the grey candles and the footer are calculated on this timeframe (previous completed bar, no repainting). Blank or a timeframe below the chart = the chart's own timeframe.")
+atrLen = input.int(14, "ATR length (for scaling)", minval = 1, group = "General")
+
+grpMA  = "1 · Moving averages"
+maFast = input.int(50, "Fast EMA", minval = 1, group = grpMA)
+maSlow = input.int(200, "Slow EMA", minval = 1, group = grpMA)
+maSlp  = input.int(10, "Fast EMA slope lookback", minval = 1, group = grpMA)
+
+grpAdx = "2 · ADX / DMI"
+diLen  = input.int(14, "DI length", minval = 1, group = grpAdx)
+adxSm  = input.int(14, "ADX smoothing", minval = 1, group = grpAdx)
+adxMin = input.int(20, "ADX needed for a trend", minval = 0, group = grpAdx)
+
+grpMac  = "3 · MACD"
+macdF   = input.int(12, "Fast", minval = 1, group = grpMac)
+macdS   = input.int(26, "Slow", minval = 1, group = grpMac)
+macdSig = input.int(9, "Signal", minval = 1, group = grpMac)
+
+grpSt   = "4 · Supertrend"
+stFact  = input.float(3.0, "Factor", minval = 0.1, step = 0.1, group = grpSt)
+stLen   = input.int(10, "ATR length", minval = 1, group = grpSt)
+
+grpIch  = "5 · Ichimoku"
+ichConv = input.int(9, "Conversion (Tenkan)", minval = 1, group = grpIch)
+ichBase = input.int(26, "Base (Kijun)", minval = 1, group = grpIch)
+ichSpan = input.int(52, "Span B", minval = 1, group = grpIch)
+ichDisp = input.int(26, "Displacement", minval = 1, group = grpIch)
+
+grpA    = "Asset"
+assetIn = input.string("Auto", "Asset preset", options = ["Auto", "Indices", "Forex", "Metals", "Crypto", "Custom"], group = grpA,
+     tooltip = "Auto detects the symbol type. Custom uses the steepness scale below.")
+
+grpK      = "Candle colouring"
+colRange  = input.bool(true, "Grey out candles when ranging", group = grpK)
+rngMode   = input.string("ADX and steepness", "Ranging means", options = ["ADX and steepness", "ADX only", "Steepness only"], group = grpK,
+     tooltip = "ADX below its trend level and/or steepness inside the flat zone.")
+colVol    = input.bool(true, "Highlight high-volume candles", group = grpK)
+volCandle = input.int(90, "High-volume candle: busier than (%) of recent candles", minval = 50, maxval = 99, group = grpK)
+
+grpSl  = "Trend steepness"
+sLen   = input.int(50, "Regression length (bars)", minval = 10, group = grpSl,
+     tooltip = "The asset presets are calibrated for 50 bars. With another length, 100% no longer means the top ~5% of slopes.")
+sScale = input.float(10.0, "Custom: 100% = this many ATRs of travel", minval = 1, step = 0.5, group = grpSl)
+sFlat  = input.int(15, "Flat below (%)", minval = 1, maxval = 90, group = grpSl)
+
+grpV    = "Volume meter"
+showVol = input.bool(true, "Show volume meter", group = grpV)
+vLen    = input.int(100, "Activity: compare with last (bars)", minval = 10, group = grpV)
+vWin    = input.int(1, "Buy/sell split over last (candles)", minval = 1, maxval = 50, group = grpV)
+vLowTf  = input.timeframe("1", "Intrabar timeframe for the buy/sell split", group = grpV,
+     tooltip = "Must be lower than the chart. On a chart this low, the split falls back to where each candle closed in its range, and the panel reads DOWN / UP instead of SELL / BUY.")
+vLive   = input.bool(true, "Use the live (still-forming) candle", group = grpV,
+     tooltip = "Off = last completed candle (steady reading). On = the meter moves as volume comes in during the current candle. It then starts near 0% at each candle open, because a part of a candle is compared with whole candles: the line is marked 'forming'.")
+vSrcIn  = input.string("Auto", "Volume source", options = ["Auto", "Volume", "Range (no volume)"], group = grpV,
+     tooltip = "Auto uses volume when the symbol has it, otherwise candle range (a proxy for activity).")
+vHigh   = input.int(80, "Activity HIGH above (%)", minval = 50, maxval = 99, group = grpV)
+vLow    = input.int(30, "Activity LOW below (%)", minval = 1, maxval = 50, group = grpV)
+
+grpC   = "Timeframe consensus"
+cTf1   = input.timeframe("1", "Timeframe 1", group = grpC,
+     tooltip = "The lights are exact when each timeframe divides the chart timeframe or is a multiple of it. Otherwise a light can change in mid-candle.")
+cTf2   = input.timeframe("3", "Timeframe 2", group = grpC)
+cTf3   = input.timeframe("5", "Timeframe 3", group = grpC)
+cTf4   = input.timeframe("15", "Timeframe 4", group = grpC)
+cTf5   = input.timeframe("30", "Timeframe 5", group = grpC)
+cTf6   = input.timeframe("60", "Timeframe 6", group = grpC)
+cTf7   = input.timeframe("240", "Timeframe 7", group = grpC)
+cLen   = input.int(50, "EMA length", minval = 5, group = grpC)
+cSlope = input.int(5, "EMA slope lookback (bars)", minval = 1, group = grpC)
+cNeed  = input.int(5, "Timeframes needed to call a trend", minval = 1, maxval = 7, group = grpC)
+iNeed  = input.int(4, "Indicators needed to call a trend (of 5)", minval = 1, maxval = 5, group = grpC)
+
+grpG     = "Panel"
+pPosS    = input.string("Bottom right", "Panel position", options = ["Bottom right", "Bottom left", "Bottom center", "Middle right", "Top right", "Top left"], group = grpG)
+pSize    = input.string("Normal", "Panel size", options = ["Small", "Normal", "Large"], group = grpG)
+show1    = input.bool(true, "Show Moving averages", group = grpG)
+show2    = input.bool(true, "Show ADX / DMI", group = grpG)
+show3    = input.bool(true, "Show MACD", group = grpG)
+show4    = input.bool(true, "Show Supertrend", group = grpG)
+show5    = input.bool(true, "Show Ichimoku", group = grpG)
+showSl   = input.bool(true, "Show trend steepness", group = grpG)
+show6    = input.bool(true, "Show indicator agreement lights", group = grpG)
+showTfL  = input.bool(true, "Show timeframe lights", group = grpG)
+showFoot = input.bool(true, "Show asset / market footer", group = grpG)
+
+// ───────────────────────────── Asset detection ─────────────────────
+tkU      = str.upper(syminfo.ticker)
+isMetal  = str.startswith(tkU, "XAU") or str.startswith(tkU, "XAG") or str.startswith(tkU, "XPT") or str.startswith(tkU, "XPD") or
+     str.contains(tkU, "GOLD") or str.contains(tkU, "SILVER")
+autoCls  = syminfo.type == "crypto" ? "Crypto" : isMetal ? "Metals" : syminfo.type == "forex" ? "Forex" :
+     (syminfo.type == "index" or syminfo.type == "cfd" or syminfo.type == "futures") ? "Indices" : "Other"
+assetCls = assetIn == "Auto" ? autoCls : assetIn
+// Steepness scale (100% = this many ATRs of regression travel over the window), calibrated per asset class
+stScale  = assetCls == "Crypto" ? SC_CRYPTO : assetCls == "Metals" ? SC_METALS : assetCls == "Forex" ? SC_FOREX :
+     assetCls == "Indices" ? SC_INDICES : assetCls == "Custom" ? sScale : SC_METALS
+
+// ───────────────────────────── Helpers ─────────────────────────────
+clamp(float x) => math.max(-1.0, math.min(1.0, x))
+
+stTxt(int s, string up, string dn, string flat) => s == 1 ? up : s == -1 ? dn : flat
+
+// Verdict of a vote: a side needs the required count and more votes than the other side
+verdict(int nb, int ns, int need) => nb >= need and nb > ns ? 1 : ns >= need and ns > nb ? -1 : 0
+
+// Chart timeframe in seconds. A tick chart has no fixed duration: 0, so every timeframe counts as at or above the chart
+chartSecs = timeframe.isticks ? 0 : timeframe.in_seconds(timeframe.period)
+// Seconds in a timeframe string ("" = the chart's own timeframe)
+tfSecs(string tf) => tf == "" ? chartSecs : str.endswith(tf, "T") ? 0 : timeframe.in_seconds(tf)
+
+// Label of a timeframe string: 30S, 5m, 90m, 1H, 4H, 1D, 1W, 1M, 10T
+tfLabel(string tf) =>
+    string t     = tf == "" ? timeframe.period : tf
+    bool hasUnit = str.endswith(t, "S") or str.endswith(t, "T") or str.endswith(t, "D") or str.endswith(t, "W") or str.endswith(t, "M")
+    float mins   = hasUnit ? na : str.tonumber(t)            // digits only = minutes
+    hasUnit ? (str.length(t) == 1 ? "1" + t : t) : na(mins) ? t :
+         mins >= 60 and mins % 60 == 0 ? str.tostring(mins / 60, "#") + "H" : str.tostring(mins, "#") + "m"
+
+// All five indicators: returns [score 0–100, state −1/0/1] for each, plus ADX value
+indicators() =>
+    a = ta.atr(atrLen)
+    // 1 · Moving averages
+    eF = ta.ema(close, maFast)
+    eS = ta.ema(close, maSlow)
+    slp = eF - eF[maSlp]
+    maSc = 50.0 + 50.0 * (0.4 * clamp((close - eS) / (3.0 * a)) + 0.3 * (eF > eS ? 1.0 : -1.0) + 0.3 * clamp(slp / a))
+    maSt = close > eS and eF > eS and slp > 0 ? 1 : close < eS and eF < eS and slp < 0 ? -1 : 0
+    // 2 · ADX / DMI
+    [diP, diM, adx] = ta.dmi(diLen, adxSm)
+    dir = (diP - diM) / math.max(diP + diM, 1e-10)
+    adSc = 50.0 + 50.0 * clamp(2.0 * dir) * math.min(adx / 40.0, 1.0)
+    adSt = adx >= adxMin ? (diP > diM ? 1 : -1) : 0
+    // 3 · MACD
+    [mL, mS, mH] = ta.macd(close, macdF, macdS, macdSig)
+    mcSc = 50.0 + 50.0 * (0.5 * math.sign(mL) + 0.5 * clamp(mH / (0.5 * a)))
+    mcSt = mL > mS and mL > 0 ? 1 : mL < mS and mL < 0 ? -1 : 0
+    // 4 · Supertrend (Pine: direction < 0 = uptrend)
+    [stLine, stDir] = ta.supertrend(stFact, stLen)
+    up = stDir < 0
+    stSc = 50.0 + (up ? 1.0 : -1.0) * (20.0 + 30.0 * math.min(math.abs(close - stLine) / (3.0 * a), 1.0))
+    stSt = up ? 1 : -1
+    // 5 · Ichimoku
+    tenkan = math.avg(ta.highest(high, ichConv), ta.lowest(low, ichConv))
+    kijun  = math.avg(ta.highest(high, ichBase), ta.lowest(low, ichBase))
+    spanA  = math.avg(tenkan, kijun)
+    spanB  = math.avg(ta.highest(high, ichSpan), ta.lowest(low, ichSpan))
+    cloudA = spanA[ichDisp - 1]
+    cloudB = spanB[ichDisp - 1]
+    cTop   = math.max(cloudA, cloudB)
+    cBot   = math.min(cloudA, cloudB)
+    pos    = close > cTop ? 1.0 : close < cBot ? -1.0 : 0.0
+    tk     = tenkan > kijun ? 1.0 : tenkan < kijun ? -1.0 : 0.0
+    fut    = spanA > spanB ? 1.0 : spanA < spanB ? -1.0 : 0.0
+    icSc   = 50.0 + 50.0 * (0.5 * pos + 0.25 * tk + 0.25 * fut)
+    icSt   = pos > 0 and tk > 0 ? 1 : pos < 0 and tk < 0 ? -1 : 0
+    // 6 · Trend steepness: regression slope × length, in ATRs, scaled to ±100%
+    lrSlope = ta.linreg(close, sLen, 0) - ta.linreg(close, sLen, 1)
+    steep   = 100.0 * clamp(lrSlope * (sLen - 1) / (stScale * a))
+    [maSc, maSt, adSc, adSt, adx, mcSc, mcSt, stSc, stSt, icSc, icSt, steep]
+
+// Previous-bar version, used with lookahead for a higher indicator timeframe so nothing repaints
+indicatorsPrev() =>
+    [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12] = indicators()
+    [a1[1], a2[1], a3[1], a4[1], a5[1], a6[1], a7[1], a8[1], a9[1], a10[1], a11[1], a12[1]]
+
+useHtfInd = indTf != "" and timeframe.in_seconds(indTf) > chartSecs
+[c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12] = indicators()
+// Higher indicator timeframe only. On the chart's own timeframe the request is not issued: v8.1 computed all
+// the gauges a second time there and never used the result.
+[h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11, h12] = if useHtfInd
+    [q1, q2, q3, q4, q5, q6, q7, q8, q9, q10, q11, q12] = request.security(syminfo.tickerid, indTf,
+         indicatorsPrev(), lookahead = barmerge.lookahead_on)
+    [q1, q2, q3, q4, q5, q6, q7, q8, q9, q10, q11, q12]
+else
+    [float(na), int(na), float(na), int(na), float(na), float(na), int(na), float(na), int(na), float(na), int(na), float(na)]
+// Chart-timeframe values: with confirmed-only, use the last closed candle (higher-TF values are already closed)
+pick(float hv, float cv) => useHtfInd ? hv : confOnly ? cv[1] : cv
+pickI(int hv, int cv) => useHtfInd ? hv : confOnly ? cv[1] : cv
+maSc = nz(pick(h1, c1), 50.0)
+maSt = nz(pickI(h2, c2))
+adSc = nz(pick(h3, c3), 50.0)
+adSt = nz(pickI(h4, c4))
+adxV = nz(pick(h5, c5))
+mcSc = nz(pick(h6, c6), 50.0)
+mcSt = nz(pickI(h7, c7))
+stSc = nz(pick(h8, c8), 50.0)
+stSt = nz(pickI(h9, c9))
+icSc = nz(pick(h10, c10), 50.0)
+icSt = nz(pickI(h11, c11))
+steepV = nz(pick(h12, c12))
+// Each candle's own values, used for colouring that candle
+adxBar   = nz(useHtfInd ? h5 : c5)
+steepBar = nz(useHtfInd ? h12 : c12)
+slSt   = steepV >= sFlat ? 1 : steepV <= -sFlat ? -1 : 0
+
+iBulls = (maSt == 1 ? 1 : 0) + (adSt == 1 ? 1 : 0) + (mcSt == 1 ? 1 : 0) + (stSt == 1 ? 1 : 0) + (icSt == 1 ? 1 : 0)
+iBears = (maSt == -1 ? 1 : 0) + (adSt == -1 ? 1 : 0) + (mcSt == -1 ? 1 : 0) + (stSt == -1 ? 1 : 0) + (icSt == -1 ? 1 : 0)
+iState = verdict(iBulls, iBears, iNeed)
+// The same vote on the chart's own candle, before any confirmed-only shift: what the alerts use
+iBullsL = (c2 == 1 ? 1 : 0) + (c4 == 1 ? 1 : 0) + (c7 == 1 ? 1 : 0) + (c9 == 1 ? 1 : 0) + (c11 == 1 ? 1 : 0)
+iBearsL = (c2 == -1 ? 1 : 0) + (c4 == -1 ? 1 : 0) + (c7 == -1 ? 1 : 0) + (c9 == -1 ? 1 : 0) + (c11 == -1 ? 1 : 0)
+iLive   = verdict(iBullsL, iBearsL, iNeed)
+
+// ───────────────────────────── 6 · Timeframe consensus ─────────────
+// Timeframes at or above the chart: previous completed bar via request.security (no repainting).
+// Timeframes below the chart: the last completed intrabar via request.security_lower_tf.
+tfState(string tf) =>
+    int st = 0
+    var int lastLow = 0    // last good lower-timeframe reading (kept while no intrabar of the candle has closed yet)
+    if tfSecs(tf) >= chartSecs
+        [c, e, eOld] = request.security(syminfo.tickerid, tf,
+             [close[1], ta.ema(close, cLen)[1], ta.ema(close, cLen)[1 + cSlope]], lookahead = barmerge.lookahead_on)
+        st := c > e and e > eOld ? 1 : c < e and e < eOld ? -1 : 0
+    else
+        [cA, eA, oA, tA] = request.security_lower_tf(syminfo.tickerid, tf,
+             [close, ta.ema(close, cLen), ta.ema(close, cLen)[cSlope], time_close])
+        k = cA.size()
+        // Last intrabar that has closed. Forming candle: the array ends with the forming intrabar, so take the one
+        // before it. Closed candle: its last intrabar is complete (v8.1 never read it), unless it runs past the
+        // candle's close (a timeframe that does not divide the chart's): then it is skipped.
+        j = k - 2
+        if barstate.isconfirmed and k > 0
+            if not (tA.get(k - 1) > time_close)
+                j := k - 1
+        if j >= 0
+            c = cA.get(j)
+            e = eA.get(j)
+            eOld = oA.get(j)
+            lastLow := c > e and e > eOld ? 1 : c < e and e < eOld ? -1 : 0
+        st := lastLow
+    st
+
+raw1 = tfState(cTf1)
+raw2 = tfState(cTf2)
+raw3 = tfState(cTf3)
+raw4 = tfState(cTf4)
+raw5 = tfState(cTf5)
+raw6 = tfState(cTf6)
+raw7 = tfState(cTf7)
+// A light below the chart timeframe as it stood when the previous candle closed (fixed while a candle forms).
+// Lights at or above the chart are completed bars already.
+lockLow(string tf, int st) => tfSecs(tf) < chartSecs ? nz(st[1]) : st
+lk1 = lockLow(cTf1, raw1)
+lk2 = lockLow(cTf2, raw2)
+lk3 = lockLow(cTf3, raw3)
+lk4 = lockLow(cTf4, raw4)
+lk5 = lockLow(cTf5, raw5)
+lk6 = lockLow(cTf6, raw6)
+lk7 = lockLow(cTf7, raw7)
+// Confirmed-only shows the locked lights; LIVE shows the lower-timeframe lights as they move inside the candle
+st1 = confOnly ? lk1 : raw1
+st2 = confOnly ? lk2 : raw2
+st3 = confOnly ? lk3 : raw3
+st4 = confOnly ? lk4 : raw4
+st5 = confOnly ? lk5 : raw5
+st6 = confOnly ? lk6 : raw6
+st7 = confOnly ? lk7 : raw7
+
+bulls = (st1 == 1 ? 1 : 0) + (st2 == 1 ? 1 : 0) + (st3 == 1 ? 1 : 0) + (st4 == 1 ? 1 : 0) + (st5 == 1 ? 1 : 0) + (st6 == 1 ? 1 : 0) + (st7 == 1 ? 1 : 0)
+bears = (st1 == -1 ? 1 : 0) + (st2 == -1 ? 1 : 0) + (st3 == -1 ? 1 : 0) + (st4 == -1 ? 1 : 0) + (st5 == -1 ? 1 : 0) + (st6 == -1 ? 1 : 0) + (st7 == -1 ? 1 : 0)
+consState = verdict(bulls, bears, cNeed)
+// The same vote on the locked lights: what the alerts use
+bullsL = (lk1 == 1 ? 1 : 0) + (lk2 == 1 ? 1 : 0) + (lk3 == 1 ? 1 : 0) + (lk4 == 1 ? 1 : 0) + (lk5 == 1 ? 1 : 0) + (lk6 == 1 ? 1 : 0) + (lk7 == 1 ? 1 : 0)
+bearsL = (lk1 == -1 ? 1 : 0) + (lk2 == -1 ? 1 : 0) + (lk3 == -1 ? 1 : 0) + (lk4 == -1 ? 1 : 0) + (lk5 == -1 ? 1 : 0) + (lk6 == -1 ? 1 : 0) + (lk7 == -1 ? 1 : 0)
+consLock = verdict(bullsL, bearsL, cNeed)
+
+// ───────────────────────────── Volume ──────────────────────────────
+cumVol   = ta.cum(nz(volume))                         // computed every bar (kept out of the "and")
+volAvail = not na(volume) and cumVol > 0
+useVolD  = vSrcIn == "Volume" ? true : vSrcIn == "Range (no volume)" ? false : volAvail
+trueRng  = ta.tr(true)                                 // computed every bar (kept out of the ternary)
+actSrc   = useVolD ? nz(volume) : trueRng              // activity source: volume, or candle range when there is none
+
+// true = real intrabar split; false = fallback (chart at or below the intrabar timeframe, or a tick chart)
+splitIntra = vLowTf != "" and timeframe.in_seconds(vLowTf) < chartSecs
+// Buy / sell split of each chart candle (weighted by volume, or by range when there is no volume)
+upDnVol() =>
+    float upV = 0.0
+    float dnV = 0.0
+    if splitIntra
+        [lo, lc, lv, lr] = request.security_lower_tf(syminfo.tickerid, vLowTf, [open, close, volume, high - low])
+        n = lc.size()
+        if n > 0
+            for i = 0 to n - 1
+                v = useVolD ? nz(lv.get(i)) : nz(lr.get(i))
+                if lc.get(i) > lo.get(i)
+                    upV += v
+                else if lc.get(i) < lo.get(i)
+                    dnV += v
+                else
+                    upV += v / 2
+                    dnV += v / 2
+    else
+        rng = high - low
+        f   = rng > 0 ? (close - low) / rng : 0.5
+        w   = useVolD ? nz(volume) : rng
+        upV := w * f
+        dnV := w * (1 - f)
+    [upV, dnV]
+
+[upBar, dnBar] = upDnVol()
+upSum  = math.sum(upBar, vWin)
+dnSum  = math.sum(dnBar, vWin)
+bullV  = upSum + dnSum > 0 ? 100.0 * upSum / (upSum + dnSum) : 50.0
+vPct   = ta.percentrank(actSrc, vLen)              // overall activity: % of the last vLen candles that were quieter
+vRel   = actSrc / ta.sma(actSrc, vLen)
+liveV  = vLive and not confOnly
+volPct = nz(liveV ? vPct : vPct[1])
+volRel = nz(liveV ? vRel : vRel[1])
+bullPct = nz(liveV ? bullV : bullV[1], 50.0)
+bearPct = 100.0 - bullPct
+
+// ───────────────────────────── Candle colouring ────────────────────
+bgc      = chart.bg_color
+isDark   = (0.299 * color.r(bgc) + 0.587 * color.g(bgc) + 0.114 * color.b(bgc)) < 128
+volCol   = isDark ? color.white : #131722
+rangeCol = isDark ? #4A4E59 : #B2B5BE
+warm     = bar_index > math.max(sLen, maSlow, 2 * adxSm) + 5     // ignore the first bars while indicators warm up
+isRange  = rngMode == "ADX only" ? warm and adxBar < adxMin : rngMode == "Steepness only" ? warm and math.abs(steepBar) < sFlat :
+     warm and adxBar < adxMin and math.abs(steepBar) < sFlat
+bigVolC  = colVol and useVolD and actSrc > 0 and nz(vPct) >= volCandle
+showCol  = not confOnly or barstate.isconfirmed          // confirmed-only: colour a candle once it has closed
+barcolor(not showCol ? na : bigVolC ? volCol : colRange and isRange ? rangeCol : na, title = "Ranging / high-volume candles")
+
+// ───────────────────────────── Alerts ──────────────────────────────
+// Always on closed candles, in LIVE mode too, so an alert never fires on a state that is not final.
+// Chart-timeframe gauges: the candle's final state, on its closing tick. Higher indicator timeframe and
+// timeframe lights: completed bars only, fixed while a candle forms, so they fire on the first tick.
+iUp = useHtfInd ? iState == 1 and iState[1] != 1 : barstate.isconfirmed and iLive == 1 and iLive[1] != 1
+iDn = useHtfInd ? iState == -1 and iState[1] != -1 : barstate.isconfirmed and iLive == -1 and iLive[1] != -1
+alertcondition(iUp, "Indicators agree BULLISH", "{{ticker}} {{interval}}: trend indicators now agree BULLISH")
+alertcondition(iDn, "Indicators agree BEARISH", "{{ticker}} {{interval}}: trend indicators now agree BEARISH")
+alertcondition(consLock == 1 and consLock[1] != 1,   "TF consensus BULLISH", "{{ticker}} {{interval}}: timeframe consensus turned BULLISH")
+alertcondition(consLock == -1 and consLock[1] != -1, "TF consensus BEARISH", "{{ticker}} {{interval}}: timeframe consensus turned BEARISH")
+
+// ───────────────────────────── Dashboard panel ─────────────────────
+pPos  = pPosS == "Bottom left" ? position.bottom_left : pPosS == "Bottom center" ? position.bottom_center :
+     pPosS == "Middle right" ? position.middle_right : pPosS == "Top right" ? position.top_right :
+     pPosS == "Top left" ? position.top_left : position.bottom_right
+// Vivid panel palette (candle colours are unchanged)
+VBULL = isDark ? #00E676 : #00A152
+VBEAR = isDark ? #FF3D57 : #D50000
+VNEU  = isDark ? #FFC400 : #FF8F00
+PBG   = isDark ? #0B0E14 : #FFFFFF
+FG    = isDark ? #E6E9EF : #131722
+FGDIM = isDark ? #8A8E99 : #6A6D78
+OFFG  = isDark ? #1A1D26 : #E3E6EE
+CLEAR = color.new(color.black, 100)
+NCOL  = 17                                   // LED columns (1..17); 0 = names, 18 = value, 19 = state badge
+var table P = table.new(pPos, 20, 20, bgcolor = PBG, frame_color = FGDIM, frame_width = 2,
+     border_color = CLEAR, border_width = 1)
+
+vcol(int st) => st == 1 ? VBULL : st == -1 ? VBEAR : VNEU
+inkOn(int st) => st == 0 ? #131722 : color.white            // readable text on a coloured badge
+offCol(int st) => isDark ? color.new(vcol(st), 86) : OFFG    // unlit LEDs glow faintly in the trend colour
+
+sz  = pSize == "Small" ? 0.8 : pSize == "Large" ? 1.3 : 1.0
+LW  = 0.42 * sz                              // LED width  (% of chart width)
+LH  = 1.9 * sz                               // LED height (% of chart height)
+VH  = LH / 3.0                               // volume brick height: one third of an LED row
+TS  = pSize == "Small" ? size.tiny : pSize == "Large" ? size.normal : size.small
+TT  = pSize == "Large" ? size.small : size.tiny
+
+led(int r, int c, color col) =>
+    P.cell(c, r, "", width = LW, height = LH, bgcolor = col)
+
+nameCell(int r, string t) =>
+    P.cell(0, r, t, text_color = FG, text_size = TS, text_halign = text.align_left)
+
+endCells(int r, string v, string s, int st) =>
+    P.cell(18, r, v, text_color = vcol(st), text_size = TS, text_halign = text.align_right, text_font_family = font.family_monospace)
+    P.cell(19, r, " " + s + " ", text_color = inkOn(st), bgcolor = vcol(st), text_size = TT, text_halign = text.align_center)
+
+// LED bar like a rev counter: lit segments get brighter towards the tip
+meterRow(int r, string name, float v, int st, string vTxt, string sTxt) =>
+    nameCell(r, name)
+    strength = math.min(100.0, math.abs(v - 50.0) * 2.0)      // 0 = neutral … 100 = strongest, in the trend's colour
+    n = int(math.round(strength / 100.0 * NCOL))
+    for i = 1 to NCOL
+        tA = n > 1 ? int(math.round(55.0 * (1.0 - (i - 1.0) / (n - 1.0)))) : 0
+        led(r, i, i <= n ? color.new(vcol(st), tA) : offCol(st))
+    lean = st != 0 ? "" : v > 50.0 ? " ▲" : v < 50.0 ? " ▼" : ""      // a neutral gauge can still lean: show which way
+    endCells(r, vTxt + lean, sTxt, st)
+
+steepRow(int r, float v, int st) =>
+    nameCell(r, "STEEPNESS")
+    m  = int(math.round(math.min(100.0, math.abs(v)) / 100.0 * 8))
+    c0 = st == 0 ? VNEU : v < 0 ? VBEAR : VBULL
+    for i = 1 to NCOL
+        d  = math.abs(i - 9)                                   // distance from the centre marker
+        on = i != 9 and d <= m and ((i < 9 and v < 0) or (i > 9 and v > 0))
+        tA = m > 1 ? int(math.round(55.0 * (1.0 - (d - 1.0) / (m - 1.0)))) : 0
+        led(r, i, i == 9 ? FG : on ? color.new(c0, tA) : offCol(st))
+    endCells(r, str.tostring(math.floor(math.abs(v)), "#") + "%", stTxt(st, "BULLISH", "BEARISH", "FLAT"), st)
+
+lightGroup(int r, int cFrom, int cTo, string t, int st) =>
+    P.cell(cFrom, r, t, width = LW, height = LH, bgcolor = vcol(st), text_color = inkOn(st), text_size = TT)
+    if cTo > cFrom
+        for i = cFrom + 1 to cTo
+            led(r, i, vcol(st))
+        P.merge_cells(cFrom, r, cTo, r)
+
+if barstate.islast
+    P.clear(0, 0, 19, 19)
+    P.set_frame_color(vcol(iState))                           // glowing frame in the overall bias colour
+    r = 0
+    tfT = tfLabel(useHtfInd ? indTf : timeframe.period)
+    // Header banner in the overall bias colour
+    P.cell(0, r, "◉  BTM TREND COCKPIT   ·   " + syminfo.ticker + "  " + tfT + "   ·   " + stTxt(iState, "BULLISH BIAS", "BEARISH BIAS", "NO CLEAR BIAS"),
+         text_color = inkOn(iState), bgcolor = vcol(iState), text_size = TS, text_halign = text.align_center)
+    P.merge_cells(0, r, 19, r)
+    r += 1
+    if show1
+        meterRow(r, "MOVING AVG", maSc, maSt, str.tostring(math.min(100.0, math.abs(maSc - 50.0) * 2.0), "#") + "%", stTxt(maSt, "BULLISH", "BEARISH", "MIXED"))
+        r += 1
+    if show2
+        meterRow(r, "ADX / DMI", adSc, adSt, "ADX " + str.tostring(math.floor(adxV), "#"), stTxt(adSt, "UPTREND", "DOWNTREND", "NO TREND"))
+        r += 1
+    if show3
+        meterRow(r, "MACD", mcSc, mcSt, str.tostring(math.min(100.0, math.abs(mcSc - 50.0) * 2.0), "#") + "%", stTxt(mcSt, "BULLISH", "BEARISH", "TURNING"))
+        r += 1
+    if show4
+        meterRow(r, "SUPERTREND", stSc, stSt, str.tostring(math.min(100.0, math.abs(stSc - 50.0) * 2.0), "#") + "%", stTxt(stSt, "UP", "DOWN", "—"))
+        r += 1
+    if show5
+        meterRow(r, "ICHIMOKU", icSc, icSt, str.tostring(math.min(100.0, math.abs(icSc - 50.0) * 2.0), "#") + "%", stTxt(icSt, "ABOVE CLOUD", "BELOW CLOUD", "MIXED"))
+        r += 1
+    if showSl
+        steepRow(r, steepV, slSt)
+        r += 1
+    if show6
+        nameCell(r, "AGREEMENT")
+        lightGroup(r, 1, 3, "MA", maSt)
+        lightGroup(r, 4, 6, "ADX", adSt)
+        lightGroup(r, 7, 9, "MACD", mcSt)
+        lightGroup(r, 10, 12, "ST", stSt)
+        lightGroup(r, 13, 15, "ICH", icSt)
+        led(r, 16, CLEAR)
+        led(r, 17, CLEAR)
+        endCells(r, (iBulls > iBears ? str.tostring(iBulls) + "/5 ▲" : iBears > iBulls ? str.tostring(iBears) + "/5 ▼" : str.tostring(iBulls) + "/5 ="), stTxt(iState, "BULLISH", "BEARISH", "MIXED"), iState)
+        r += 1
+    if showTfL
+        nameCell(r, "TIMEFRAMES")
+        lightGroup(r, 1, 2, tfLabel(cTf1), st1)
+        lightGroup(r, 3, 4, tfLabel(cTf2), st2)
+        lightGroup(r, 5, 6, tfLabel(cTf3), st3)
+        lightGroup(r, 7, 8, tfLabel(cTf4), st4)
+        lightGroup(r, 9, 10, tfLabel(cTf5), st5)
+        lightGroup(r, 11, 12, tfLabel(cTf6), st6)
+        lightGroup(r, 13, 14, tfLabel(cTf7), st7)
+        for i = 15 to NCOL
+            led(r, i, CLEAR)
+        endCells(r, (bulls > bears ? str.tostring(bulls) + "/7 ▲" : bears > bulls ? str.tostring(bears) + "/7 ▼" : str.tostring(bulls) + "/7 ="), stTxt(consState, "BULLISH", "BEARISH", "MIXED"), consState)
+        r += 1
+    if showVol
+        // Mirrored rising bricks (one third of an LED row tall per level): 8 per side, tallest in the middle
+        litBear = int(math.round(bearPct / 100.0 * 8))
+        litBull = int(math.round(bullPct / 100.0 * 8))
+        fade    = int(math.round(55.0 * (1.0 - volPct / 100.0)))
+        r0 = r
+        for lvl = 0 to 5                                   // 0 = top level … 5 = bottom
+            for k = 0 to 7                                 // k = 0 innermost (tallest) … 7 outermost (smallest)
+                h     = math.max(1, int(math.round(6.0 - 4.5 * k / 7.0)))
+                isLit = 5 - lvl < h
+                frac  = k / 7.0
+                cBr   = color.new(color.from_gradient(frac, 0.0, 1.0, VBEAR, #FF9AA5), fade)
+                cBu   = color.new(color.from_gradient(frac, 0.0, 1.0, VBULL, #9CF5CF), fade)
+                P.cell(8 - k, r0 + lvl, "", width = LW, height = VH, bgcolor = not isLit ? CLEAR : k >= 8 - litBear ? cBr : OFFG)
+                P.cell(10 + k, r0 + lvl, "", width = LW, height = VH, bgcolor = not isLit ? CLEAR : k >= 8 - litBull ? cBu : OFFG)
+            P.cell(9, r0 + lvl, "", width = LW * 0.5, height = VH)
+        P.cell(0, r0, useVolD ? "VOLUME" : "ACTIVITY", text_color = FG, text_size = TT, text_halign = text.align_left)
+        P.merge_cells(0, r0, 0, r0 + 5)
+        P.cell(18, r0, (useVolD and splitIntra ? "SELL " : "DOWN ") + str.tostring(bearPct, "#") + "%", text_color = VBEAR, text_size = TT,
+             text_halign = text.align_right, text_font_family = font.family_monospace)
+        P.merge_cells(18, r0, 18, r0 + 5)
+        P.cell(19, r0, (useVolD and splitIntra ? "BUY " : "UP ") + str.tostring(bullPct, "#") + "%", text_color = VBULL, text_size = TT,
+             text_halign = text.align_left, text_font_family = font.family_monospace)
+        P.merge_cells(19, r0, 19, r0 + 5)
+        r := r0 + 6
+        actTxt = (liveV ? "forming · " : "") + (useVolD ? "" : "range-based · ") + str.tostring(volPct, "#") + "% activity · " + str.tostring(volRel, "#.0") + "× avg · " +
+             (volPct >= vHigh ? "HIGH" : volPct <= vLow ? "LOW" : "NORMAL")
+        P.cell(0, r, actTxt, text_color = FGDIM, text_size = TT, text_halign = text.align_center)
+        P.merge_cells(0, r, 19, r)
+        r += 1
+    if showFoot
+        mktR = confOnly ? isRange[1] : isRange
+        P.cell(0, r, str.upper(assetCls) + (assetIn == "Auto" ? " (auto)" : "") + "   ·   " + (mktR ? "RANGING" : "NOT RANGING"),
+             text_color = mktR ? FGDIM : FG, text_size = TT, text_halign = text.align_center)
+        P.merge_cells(0, r, 19, r)
