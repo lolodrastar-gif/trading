@@ -288,3 +288,38 @@ deux fois plus longues (10,3 emplacements pour des bougies de 3,5 s).
   emplacements après la bougie à son ouverture, puis s'allonge tant qu'elle dure.
 - Sur un marché lent (bougies de 30 s et plus), la boîte s'allonge d'autant ; plafond à 300
   emplacements.
+
+## 10. v2.10 : bord droit fixe en ticks (20/11)
+
+Fichier : `src/sr/SR_Boxes_v2.10.pine` (615 lignes). Affichage seulement. **Non compilé ici.**
+
+Retour après le § 9 : « ok super, un dernier problème : elle bouge, tu peux me les garder
+fixes, sinon c'est parfait », avec deux captures où la boîte finit 4 puis 7 emplacements
+après la bougie. La v2.9 règle donc le défaut d'origine sur le 100 ticks ; ce qui gêne est
+l'allongement d'un emplacement par seconde annoncé au § 9.
+
+Contrainte : sur un graphique en ticks, on ne peut avoir que deux de ces trois propriétés :
+boîte qui finit près de la bougie, bord fixe, bougie suivante toujours dans la boîte.
+Modèle `bord_droit_ticks_fixe.py`, bougies de 3,5 s en moyenne, retard d'affichage 0,3 s :
+
+| Marge (emplacements) | Bord jamais allongé : temps où la bougie dépasse | v2.10 : temps où la bougie dépasse | v2.10 : bougies pendant lesquelles le bord bouge |
+|---|---|---|---|
+| 4 | 3,6 % | 0,0 % | 61 % |
+| 8 | 0,8 % | 0,0 % | 13 % |
+| 12 | 0,3 % | 0,0 % | 4 % |
+| 20 | 0,1 % | 0,0 % | 0,8 % |
+
+Ce que fait la v2.10 :
+
+- Nouveau réglage, déclaré en dernier : « Marge à droite en ticks / range », **0 par
+  défaut : les boîtes vont jusqu'au bord droit de l'écran** (`extend.right`). Bord fixe,
+  bougie toujours dedans, plus aucune mise à jour pendant la bougie.
+- Avec une valeur N : la boîte finit N emplacements après la bougie, fixe tant que les
+  bougies durent moins de N − 2 secondes, allongée au-delà. La valeur N + 1 n'est jamais
+  utilisée : ce serait le même indice que la bougie suivante à son ouverture, et dans le
+  modèle la position n'est alors pas renvoyée à l'écran (0,05 à 0,4 % de défauts sans cette
+  règle, 0 avec).
+- Boîte prolongée jusqu'au bord droit : texte « Vol » calé à gauche de la boîte, pour ne pas
+  dépendre de la façon dont TradingView centre le texte d'une boîte prolongée (non vérifié).
+- Graphiques en minutes et plus : inchangé. Graphiques en secondes : marge générale, fixe.
+- Le graphique doit afficher « SR+ 2.10 ».

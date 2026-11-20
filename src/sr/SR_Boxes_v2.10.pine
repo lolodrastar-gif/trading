@@ -1,0 +1,615 @@
+// This Pine Script™ code is based on the MPL-2.0 licensed work by © ChartPrime
+// ("Support and Resistance (High Volume Boxes) [ChartPrime]").
+// Original: https://www.tradingview.com/script/Uz2AJ0i4-Support-and-Resistance-High-Volume-Boxes-ChartPrime/
+// This version ("SR Boxes +") extends it with additional detection, box, display and color
+// controls, and tracks several concurrent support/resistance levels per side.
+//
+// =====================================================================
+//  SR Boxes + · v2.10 — meme logique que la v2.6, moteur allege (v2.7), bord droit fixe en ticks (v2.10)
+//
+//  Ce qui ne change PAS : pivots, filtre de volume, hauteur des boites,
+//  regles de cassure / reconquete / rejet / expiration, labels, alertes,
+//  reglages (memes libelles, meme ordre, memes valeurs par defaut).
+//
+//  Ce qui change (charge) :
+//   1) Seuils EXACTS par cote. Chaque bougie fait 7 comparaisons par cote ;
+//      les niveaux ne sont parcourus que si un evenement est reellement
+//      possible (la v2.6 parcourait des que la bougie touchait la plage
+//      globale des niveaux, c'est-a-dire presque tout le temps).
+//   2) Plus aucun appel de fonction par bougie quand rien ne se passe.
+//   3) Les 3 ta.highest / ta.lowest du gradient et ta.cum sont retires du
+//      calcul par bougie : le gradient est mesure seulement a la creation
+//      d'une boite (meme fenetre, meme valeur).
+//   4) Le filtre de volume et l'ecart minimum ne sont evalues que sur une
+//      bougie de pivot (en v5 un « and » evalue toujours ses deux cotes).
+//
+//  Ce qui change (fiabilite) :
+//   5) L'etiquette de prix du niveau le plus proche est recreee a chaque
+//      rendu : elle ne peut plus etre effacee par la limite de 500 labels.
+//   6) Le bord gauche d'une boite ne peut plus sortir de l'historique.
+//   7) Fenetre du gradient limitee a 2500 (tampon de 5000 barres).
+//   8) Le bandeau « pas de volume » n'est cree que s'il est utile.
+//
+//  Retouche du 20/11 (affichage seulement) :
+//   9) Bord droit des boites : il s'arretait au milieu de la bougie en cours
+//      (mode eco). Il va maintenant plus loin que la bougie en cours.
+//  10) Une bougie d'avance : la bougie s'affiche avant que l'indicateur soit
+//      mis a jour, et pendant ce retard la boite s'arretait de nouveau au
+//      milieu. Nouveau reglage (le dernier) « Marge a droite des boites »,
+//      2 par defaut. Aucun signal ne change.
+//
+//  v2.8 (affichage seulement, aucun signal ne change) :
+//  11) Le nom affiche sur le graphique porte le numero de version (SR+ 2.8).
+//  12) Bord droit durci : il ne depend plus des indicateurs « derniere
+//      bougie » / « temps reel » de TradingView. A chaque cloture il est
+//      pose une barre plus loin que la marge, et une boite neuve nait deja
+//      a la bonne longueur.
+//
+//  v2.9 (affichage seulement, aucun signal ne change) :
+//  13) Graphiques en ticks, en range ou en secondes. TradingView y place ce
+//      qui depasse la derniere bougie selon l'HEURE (en ticks : 1 emplacement
+//      = 1 seconde), pas selon le nombre de bougies. Un bord pose « 2 bougies
+//      plus loin » etait donc rattrape des qu'une bougie durait plus de 2 s.
+//      Sur ces graphiques le bord droit est maintenant pose a « marge »
+//      emplacements apres l'instant present, et rafraichi a chaque mise a
+//      jour : il avance tant que la bougie dure et revient a la marge a
+//      chaque nouvelle bougie. Graphiques en minutes et plus : inchange.
+//  14) Marge a 0 = boites prolongees jusqu'au bord droit de l'ecran.
+//
+//  v2.10 (affichage seulement, aucun signal ne change) :
+//  15) Graphiques en ticks ou en range : bord droit FIXE. Nouveau reglage (le
+//      dernier), a 0 par defaut : les boites vont jusqu'au bord droit de
+//      l'ecran et ne bougent plus. Avec une valeur N, la boite finit N
+//      emplacements apres la bougie et ne s'allonge que si une bougie dure
+//      plus de N - 2 secondes.
+// =====================================================================
+//@version=5
+indicator("SR Boxes + v2.10", shorttitle="SR+ 2.10", overlay=true, max_boxes_count=500, max_labels_count=500, max_lines_count=500, max_bars_back=5000)
+
+// ---------------------------------------------------------------------
+// REGLAGES (identiques a la v2.6 : memes libelles, meme ordre)
+// ---------------------------------------------------------------------
+// --- DETECTION ---
+int   lookbackPeriod = input.int(5, "Lookback (largeur des boites / graduation)", minval=1, maxval=9999, group="Detection",
+     tooltip="Nombre de barres utilisé pour la largeur des boîtes.")
+int   confirmPivot   = input.int(5, "Pivot de confirmation (serré / réactif)", minval=1, maxval=2499, group="Detection",
+     tooltip="Barres de confirmation d'un pivot. Petite valeur = plus réactif (plus de signaux, plus de bruit). Grande valeur = plus serré/fiable (signaux plus rares mais plus confirmés).")
+int   vol_len         = input.int(61, "Delta Volume Filter Length (fenêtre baseline)", minval=1, maxval=5000, group="Detection",
+     tooltip="Fenêtre utilisée pour calculer la baseline de volume delta. Une valeur plus élevée filtre les boîtes à faible volume.")
+int   atrLength       = input.int(150, "ATR Length (hauteur des boites)", minval=1, maxval=5000, group="Detection")
+float volThreshold    = input.float(0.899, "Seuil de volume (x baseline)", minval=0, step=0.001, group="Detection")
+int   colorGradWindow = input.int(25, "Fenêtre du gradient de couleur", minval=1, maxval=2500, group="Detection")
+bool  volAtPivot      = input.bool(false, "Mesurer le volume sur la barre du pivot", group="Detection",
+     tooltip="Décoché (défaut) : le filtre teste le volume SIGNÉ de la barre de CONFIRMATION, comme l'original — soit N barres après le vrai pivot. Coché : il teste la MAGNITUDE du volume (|Vol|) de la barre du pivot lui-même — un creux se forme sur du volume vendeur et un sommet sur du volume acheteur, donc c'est l'intensité qui compte, pas le sens. Change les signaux.")
+float minGapMult      = input.float(0.0, "Ecart minimum entre niveaux (x ATR)", minval=0, step=0.1, group="Detection",
+     tooltip="Un nouveau pivot plus proche que X fois l'ATR d'un niveau actif (non cassé) du même côté est ignoré — évite les boîtes empilées au même prix. 0 = désactivé.")
+// --- BOITES ---
+float boxSizeMult    = input.float(0.5, "Largeur / hauteur des boites", minval=0, step=0.1, group="Boites")
+int   borderWidth    = input.int(1, "Epaisseur des bordures", minval=1, group="Boites")
+bool  showVolInBox   = input.bool(true, "Afficher le volume dans la boite", group="Boites")
+string textSizeInput = input.string("Petit", "Taille du texte", options=["Petit", "Normal", "Grand"], group="Boites")
+// --- AFFICHAGE ---
+bool showSupports    = input.bool(true, "Afficher les supports", group="Affichage")
+bool showResistances = input.bool(true, "Afficher les resistances", group="Affichage")
+bool showBreakLabels = input.bool(true, "Afficher les labels de cassure", group="Affichage")
+bool showRejectMarks = input.bool(true, "Afficher les marqueurs de rejet", group="Affichage")
+bool showHoldMarks   = input.bool(true, "Afficher les losanges de reconquete", group="Affichage")
+int  maxActiveLevels = input.int(10, "Nombre max de niveaux actifs (par cote)", minval=1, maxval=50, group="Affichage",
+     tooltip="Limite le nombre de boites support/resistance actives simultanement (au-dela, la plus ancienne est retiree). Evite le surchargement visuel et les boites 'orphelines' jamais mises a jour.")
+bool autoHideBroken  = input.bool(false, "Masquer les boites cassees automatiquement", group="Affichage")
+int  autoHideBars    = input.int(50, "  -> apres N barres", minval=1, group="Affichage")
+bool extendNearest   = input.bool(true, "Etendre le niveau le plus proche du prix", group="Affichage",
+     tooltip="Trace une ligne prolongee vers la droite jusqu'au support et a la resistance actifs les plus proches du prix.")
+// --- COULEURS ---
+color supportColorInput    = input.color(color.green, "Couleur support", group="Couleurs")
+color resistanceColorInput = input.color(color.red,   "Couleur resistance", group="Couleurs")
+int   fillTransparency     = input.int(30, "Transparence du remplissage", minval=0, maxval=100, group="Couleurs")
+// --- PERFORMANCE ---
+bool ecoRealtime = input.bool(true, "Mode eco temps reel : evenements a la cloture", group="Performance",
+     tooltip="Par defaut, attend la cloture de la bougie pour creer et actualiser les boites, marqueurs et labels. Evite les boucles sur chaque tick. Les signaux de bougies cloturees sont conserves, mais les dessins ne suivent pas la bougie en formation. Decochez pour conserver le suivi intrabougie.")
+// --- ALERTES ---
+bool alertBreaks = input.bool(true, "Alerte sur cassure de niveau", group="Alertes",
+     tooltip="Utilise la fonction alert() : dans TradingView, creer l'alerte sur cet indicateur avec la condition « Any alert() function call ». Se declenche a la cloture de la barre de cassure.")
+
+// --- BOITES (suite) : declare en dernier pour ne pas decaler les reglages deja enregistres ---
+int rightPad = input.int(2, "Marge a droite des boites (bougies)", minval=0, maxval=50, group="Boites",
+     tooltip="Graphiques en minutes ou plus, et en secondes : nombre de bougies entre la bougie en cours et le bord droit des boites (2 = deux bougies apres). 0 = boites prolongees jusqu'au bord droit de l'ecran. Les graphiques en ticks ou en range utilisent le reglage suivant.")
+int tickPad = input.int(0, "Marge a droite en ticks / range (0 = bord droit de l'ecran)", minval=0, maxval=300, group="Boites",
+     tooltip="Graphiques en ticks ou en range seulement. 0 (defaut) : les boites vont jusqu'au bord droit de l'ecran et ne bougent jamais. N : la boite finit N emplacements apres la bougie en cours (en ticks, 1 emplacement = 1 seconde) ; elle reste fixe tant que les bougies durent moins de N - 2 secondes et s'allonge au-dela, pour que la bougie suivante ne sorte pas de la boite. Avec des bougies de 3 a 5 secondes, 12 la laisse fixe presque tout le temps ; 4 la ferait bouger a la plupart des bougies.")
+
+textSize           = textSizeInput == "Petit" ? size.small : textSizeInput == "Normal" ? size.normal : size.large
+brokenTransparency = math.min(fillTransparency + 50, 95)
+// En historique toutes les bougies sont cloturees ; en direct le mode eco
+// n'agit qu'au dernier passage de la bougie.
+bool runOnBar  = not ecoRealtime or barstate.isconfirmed
+// Vrai sur les dernieres bougies du graphique, quel que soit l'etat annonce par TradingView.
+bool renderNow = barstate.islast or barstate.islastconfirmedhistory or barstate.isrealtime or bar_index >= last_bar_index - 1
+
+// Graphiques en ticks, en range ou en secondes : ce qui depasse la derniere bougie est
+// place selon l'heure. slotMs = duree d'un emplacement a droite de la derniere bougie.
+var bool tickLike  = str.endswith(timeframe.period, "T") or str.endswith(timeframe.period, "R")
+var bool irregular = tickLike or timeframe.isseconds
+var int  slotMs    = 1000
+if barstate.isfirst
+    if not tickLike
+        slotMs := timeframe.in_seconds() * 1000
+// Heure a laquelle le script a vu la bougie en cours pour la premiere fois
+// (conservee d'un tick a l'autre : sert a mesurer l'age de la bougie).
+varip int barSeenAt = na
+if irregular
+    if barstate.isnew
+        barSeenAt := timenow
+// Marge utilisee sur ce graphique : reglage « ticks / range » ou reglage general.
+var int padHere = tickLike ? tickPad : rightPad
+// Marge a 0 : boites prolongees jusqu'au bord droit de l'ecran, sans aucune mise a jour.
+var string boxExtend = padHere == 0 ? extend.right : extend.none
+// Boite prolongee : texte cale a gauche, pour qu'il ne glisse pas avec le bord de l'ecran.
+var string boxTextAlign = padHere == 0 ? text.align_left : text.align_center
+
+// ---------------------------------------------------------------------
+// TYPES ET ETAT
+// ---------------------------------------------------------------------
+type SRLevel
+    box   bx
+    float lvl
+    float lvl1
+    color baseCol
+    bool  broken   = false
+    int   brokenAt = -1
+
+type Marker
+    line  ln
+    label lb
+    float lastLvl
+
+// Valeurs « jamais atteintes » : un seuil a BIG ne declenche rien.
+float BIG   = 1.0e300
+int   NEVER = 2000000000
+
+var array<SRLevel> sups = array.new<SRLevel>()
+var array<SRLevel> ress = array.new<SRLevel>()
+var Marker supMark = Marker.new()
+var Marker resMark = Marker.new()
+var array<string> breakMessages = array.new_string()
+var int brokenSups = 0
+var int brokenRess = 0
+var int rightDone  = 0   // derniere barre jusqu'ou les boites ont ete prolongees
+
+// Seuils exacts, recalcules a chaque parcours. Tant que la bougie reste
+// entre « Dn » et « Up », aucun niveau n'a ete traverse : rien a faire.
+//   supports    : reconquete = low  traverse lvl  vers le haut ; cassure = high passe sous lvl1
+//   resistances : reconquete = high traverse lvl  vers le bas  ; cassure = low  passe sur  lvl1
+var float sHoldDn = -BIG
+var float sHoldUp = BIG
+var float sBrkDn  = -BIG
+var float sBrkUp  = BIG
+var float sRejLo  = BIG
+var float sRejHi  = -BIG
+var int   sExpAt  = NEVER
+var float rHoldDn = -BIG
+var float rHoldUp = BIG
+var float rBrkDn  = -BIG
+var float rBrkUp  = BIG
+var float rRejLo  = BIG
+var float rRejHi  = -BIG
+var int   rExpAt  = NEVER
+
+// ---------------------------------------------------------------------
+// VOLUME / PIVOTS (memes formules que la v2.6)
+// ---------------------------------------------------------------------
+var int lastDir = 1
+lastDir := close > open ? 1 : close < open ? -1 : lastDir
+float Vol      = lastDir * nz(volume)
+float baseline = ta.sma(math.abs(Vol), vol_len)
+
+var bool volSeen = false
+if not volSeen
+    if nz(volume) > 0
+        volSeen := true
+
+pivotHigh = ta.pivothigh(close, confirmPivot, confirmPivot)
+pivotLow  = ta.pivotlow(close, confirmPivot, confirmPivot)
+atr       = ta.atr(atrLength)
+
+// ---------------------------------------------------------------------
+// FONCTIONS
+// ---------------------------------------------------------------------
+// Extreme de Vol (ou de |Vol|) sur la fenetre du gradient, mesure seulement
+// a la creation d'une boite. Meme valeur que ta.highest / ta.lowest :
+// na tant que la fenetre n'est pas pleine.
+windowExtreme(int off, bool useAbs, bool wantMin) =>
+    float r = na
+    if bar_index >= off + colorGradWindow - 1
+        for i = off to off + colorGradWindow - 1
+            float v = useAbs ? math.abs(Vol[i]) : Vol[i]
+            r := na(r) ? v : wantMin ? math.min(r, v) : math.max(r, v)
+    r
+
+// Un niveau actif (non casse) du meme cote est-il deja trop proche ?
+tooClose(array<SRLevel> arr, float price) =>
+    bool res = false
+    if minGapMult > 0
+        for L in arr
+            if not L.broken and math.abs(L.lvl - price) < minGapMult * atr
+                res := true
+    res
+
+// Creation d'un niveau. Quota atteint : la boite la plus ancienne est reutilisee.
+pushLevel(array<SRLevel> arr, bool isSup, float lvl, float edge, color baseCol, string volText, int brokenBefore) =>
+    int brokenNow = brokenBefore
+    int leftX = math.max(bar_index - lookbackPeriod, 0)
+    float topY = isSup ? lvl : edge
+    float bottomY = isSup ? edge : lvl
+    color borderCol = isSup ? supportColorInput : resistanceColorInput
+    box bx = na
+    if array.size(arr) >= maxActiveLevels
+        SRLevel old = array.shift(arr)
+        if old.broken
+            brokenNow -= 1
+        bx := old.bx
+        box.set_lefttop(bx, leftX, topY)
+        box.set_rightbottom(bx, bar_index + padHere + 1, bottomY)
+        box.set_extend(bx, boxExtend)
+        box.set_text_halign(bx, boxTextAlign)
+        box.set_bgcolor(bx, baseCol)
+        box.set_border_color(bx, borderCol)
+        box.set_border_width(bx, borderWidth)
+        box.set_border_style(bx, line.style_solid)
+        box.set_text(bx, volText)
+        box.set_text_color(bx, chart.fg_color)
+        box.set_text_size(bx, textSize)
+    else
+        bx := box.new(left=leftX, top=topY, right=bar_index + padHere + 1, bottom=bottomY,
+             border_color=borderCol, border_width=borderWidth,
+             bgcolor=baseCol, text=volText, text_color=chart.fg_color,
+             text_size=textSize, extend=boxExtend, text_halign=boxTextAlign)
+    array.push(arr, SRLevel.new(bx, lvl, edge, baseCol))
+    brokenNow
+
+// Cassure d'un niveau actif : boite en pointilles, label, message d'alerte.
+doBreak(SRLevel L, bool isSup) =>
+    color koCol = isSup ? resistanceColorInput : supportColorInput
+    box.set_bgcolor(L.bx, color.new(koCol, brokenTransparency))
+    box.set_border_color(L.bx, koCol)
+    box.set_border_style(L.bx, line.style_dashed)
+    L.broken := true
+    L.brokenAt := bar_index
+    if showBreakLabels
+        label.new(bar_index, L.lvl, text=isSup ? "Break Sup" : "Break Res",
+             style=isSup ? label.style_label_down : label.style_label_up,
+             color=color.new(koCol, 0), textcolor=chart.fg_color, size=size.small)
+    if alertBreaks
+        array.push(breakMessages, (isSup ? "Support " : "Resistance ") + str.tostring(L.lvl, format.mintick))
+
+// Reconquete. La boite n'est repeinte que si le niveau etait casse
+// (sinon elle a deja ces couleurs : rendu identique, 3 appels en moins).
+doHold(SRLevel L, bool isSup, bool wasBroken, float y) =>
+    color okCol = isSup ? supportColorInput : resistanceColorInput
+    if wasBroken
+        box.set_bgcolor(L.bx, L.baseCol)
+        box.set_border_color(L.bx, okCol)
+        box.set_border_style(L.bx, line.style_solid)
+        L.broken := false
+    if showHoldMarks
+        label.new(bar_index, y, text="", style=label.style_diamond, color=okCol, size=size.tiny)
+
+// Parcours des supports. Memes evenements que la v2.6, puis recalcul des
+// seuils exacts pour les bougies suivantes. Appele seulement si necessaire.
+//   reconquete : low > lvl  et low[1]  <= lvl      (tout niveau)
+//   cassure    : high < lvl1 et high[1] >= lvl1    (niveau actif)
+//   rejet      : high > lvl  et close < lvl        (niveau casse)
+scanSup(int brokenBefore) =>
+    int brokenNow = brokenBefore
+    float holdDn = -BIG
+    float holdUp = BIG
+    float brkDn = -BIG
+    float brkUp = BIG
+    float rejLo = BIG
+    float rejHi = -BIG
+    int expAt = NEVER
+    float pLo = low[1]
+    float pHi = high[1]
+    for i = array.size(sups) - 1 to 0
+        SRLevel L = array.get(sups, i)
+        float v = L.lvl
+        bool above = low > v
+        bool gone = false
+        if L.broken
+            bool back = false
+            if above
+                back := pLo <= v
+            if back
+                doHold(L, true, true, low)
+                brokenNow -= 1
+            else
+                if showRejectMarks
+                    if high > v and close < v
+                        label.new(bar_index, low, text="", style=label.style_xcross, color=resistanceColorInput, size=size.tiny)
+                if autoHideBroken
+                    if L.brokenAt >= 0 and bar_index - L.brokenAt >= autoHideBars
+                        brokenNow -= 1
+                        box.delete(L.bx)
+                        array.remove(sups, i)
+                        gone := true
+        else
+            float e = L.lvl1
+            if high < e
+                if pHi >= e
+                    doBreak(L, true)
+                    brokenNow += 1
+            else
+                if above
+                    if pLo <= v
+                        doHold(L, true, false, low)
+        if not gone
+            if above
+                holdDn := math.max(holdDn, v)
+            else
+                holdUp := math.min(holdUp, v)
+            if L.broken
+                if showRejectMarks
+                    rejLo := math.min(rejLo, v)
+                    rejHi := math.max(rejHi, v)
+                if autoHideBroken
+                    expAt := math.min(expAt, L.brokenAt + autoHideBars)
+            else
+                float edge = L.lvl1
+                if edge <= high
+                    brkDn := math.max(brkDn, edge)
+                else
+                    brkUp := math.min(brkUp, edge)
+    [brokenNow, holdDn, holdUp, brkDn, brkUp, rejLo, rejHi, expAt]
+
+// Parcours des resistances (miroir).
+//   reconquete : high < lvl  et high[1] >= lvl     (tout niveau)
+//   cassure    : low > lvl1  et low[1]  <= lvl1    (niveau actif)
+//   rejet      : low < lvl   et close > lvl        (niveau casse)
+scanRes(int brokenBefore) =>
+    int brokenNow = brokenBefore
+    float holdDn = -BIG
+    float holdUp = BIG
+    float brkDn = -BIG
+    float brkUp = BIG
+    float rejLo = BIG
+    float rejHi = -BIG
+    int expAt = NEVER
+    float pLo = low[1]
+    float pHi = high[1]
+    for i = array.size(ress) - 1 to 0
+        SRLevel L = array.get(ress, i)
+        float v = L.lvl
+        bool below = high < v
+        bool gone = false
+        if L.broken
+            bool back = false
+            if below
+                back := pHi >= v
+            if back
+                doHold(L, false, true, high)
+                brokenNow -= 1
+            else
+                if showRejectMarks
+                    if low < v and close > v
+                        label.new(bar_index, high, text="", style=label.style_xcross, color=supportColorInput, size=size.tiny)
+                if autoHideBroken
+                    if L.brokenAt >= 0 and bar_index - L.brokenAt >= autoHideBars
+                        brokenNow -= 1
+                        box.delete(L.bx)
+                        array.remove(ress, i)
+                        gone := true
+        else
+            float e = L.lvl1
+            if low > e
+                if pLo <= e
+                    doBreak(L, false)
+                    brokenNow += 1
+            else
+                if below
+                    if pHi >= v
+                        doHold(L, false, false, high)
+        if not gone
+            if below
+                holdUp := math.min(holdUp, v)
+            else
+                holdDn := math.max(holdDn, v)
+            if L.broken
+                if showRejectMarks
+                    rejLo := math.min(rejLo, v)
+                    rejHi := math.max(rejHi, v)
+                if autoHideBroken
+                    expAt := math.min(expAt, L.brokenAt + autoHideBars)
+            else
+                float edge = L.lvl1
+                if edge >= low
+                    brkUp := math.min(brkUp, edge)
+                else
+                    brkDn := math.max(brkDn, edge)
+    [brokenNow, holdDn, holdUp, brkDn, brkUp, rejLo, rejHi, expAt]
+
+// Rendu (derniere bougie seulement) : bord droit des boites et niveau actif
+// le plus proche du prix, du bon cote.
+renderSide(array<SRLevel> arr, bool isSup, int rightX) =>
+    float nearest = na
+    float bestD = na
+    for L in arr
+        box.set_right(L.bx, rightX)
+        if not L.broken
+            float d = isSup ? close - L.lvl : L.lvl - close
+            if d >= 0
+                bool better = na(bestD)
+                if not better
+                    better := d < bestD
+                if better
+                    bestD := d
+                    nearest := L.lvl
+    nearest
+
+// Prolonge toutes les boites jusqu'a la barre rightX (cas rare, voir plus bas).
+extendBoxes(int rightX) =>
+    for L in sups
+        box.set_right(L.bx, rightX)
+    for L in ress
+        box.set_right(L.bx, rightX)
+    rightX
+
+// Graphique en ticks / range / secondes : bord droit FIXE a « padHere » emplacements de
+// la bougie en cours. Il ne s'allonge que si la bougie dure : le bord garde alors une
+// avance minimale sur l'instant present (2 emplacements en ticks, 1 en secondes), pour
+// que la bougie suivante s'ouvre dans la boite. L'age de la bougie est arrondi au-dessus
+// en ticks (elle peut finir a tout moment), en dessous en secondes.
+liveRight() =>
+    int ageSlots = 0
+    if barstate.isrealtime
+        if not na(barSeenAt)
+            float a = float(timenow - barSeenAt) / float(slotMs)
+            ageSlots := tickLike ? math.ceil(a) : math.floor(a)
+    int k = math.max(padHere, (tickLike ? 2 : 1) + math.max(0, ageSlots))
+    // Jamais « marge + 1 » : ce serait le meme indice que celui de la bougie suivante a
+    // son ouverture, et la position ne serait pas renvoyee a l'ecran.
+    if k == padHere + 1
+        k := padHere + 2
+    bar_index + math.min(350, k)
+
+// Ligne pointillee et etiquette du niveau le plus proche. L'etiquette est
+// recreee a chaque rendu : toujours la plus recente, jamais purgee par la
+// limite de 500 labels.
+updateMarker(Marker m, float lvl, color col) =>
+    if na(lvl)
+        if not na(m.lastLvl)
+            line.delete(m.ln)
+            label.delete(m.lb)
+            m.ln := na
+            m.lb := na
+            m.lastLvl := na
+    if not na(lvl)
+        bool changed = na(m.lastLvl)
+        if not changed
+            changed := lvl != m.lastLvl
+        if changed
+            line.delete(m.ln)
+            m.ln := line.new(bar_index - 1, lvl, bar_index, lvl,
+                 extend=extend.right, color=col, style=line.style_dotted, width=1)
+            m.lastLvl := lvl
+        label.delete(m.lb)
+        m.lb := label.new(bar_index, lvl, text=str.tostring(lvl, format.mintick),
+             style=label.style_label_left, color=color.new(col, 0),
+             textcolor=chart.fg_color, size=size.small)
+    true
+
+// ---------------------------------------------------------------------
+// CREATION DES NIVEAUX (evaluee seulement sur une bougie de pivot)
+// ---------------------------------------------------------------------
+bool newSup = false
+bool newRes = false
+if runOnBar
+    if not na(atr)
+        if showSupports
+            if not na(pivotLow)
+                float volP = Vol[confirmPivot]
+                float baseP = baseline[confirmPivot]
+                bool volOK = false
+                if volAtPivot
+                    if not na(volP)
+                        if not na(baseP)
+                            volOK := math.abs(volP) > baseP * volThreshold
+                else
+                    if not na(baseline)
+                        volOK := Vol > baseline * volThreshold
+                if volOK
+                    if not tooClose(sups, pivotLow)
+                        color fullCol = color.new(supportColorInput, fillTransparency)
+                        color supCol = volAtPivot ? color.from_gradient(math.abs(volP), 0, windowExtreme(confirmPivot, true, false), color(na), fullCol) : color.from_gradient(Vol, 0, windowExtreme(0, false, false), color(na), fullCol)
+                        string volText = showVolInBox ? "Vol: " + str.tostring(volAtPivot ? volP : Vol, format.volume) : ""
+                        brokenSups := pushLevel(sups, true, pivotLow, pivotLow - atr * boxSizeMult, supCol, volText, brokenSups)
+                        newSup := true
+        if showResistances
+            if not na(pivotHigh)
+                float volP = Vol[confirmPivot]
+                float baseP = baseline[confirmPivot]
+                bool volOK = false
+                if volAtPivot
+                    if not na(volP)
+                        if not na(baseP)
+                            volOK := math.abs(volP) > baseP * volThreshold
+                else
+                    if not na(baseline)
+                        volOK := Vol < -(baseline * volThreshold)
+                if volOK
+                    if not tooClose(ress, pivotHigh)
+                        color fullCol = color.new(resistanceColorInput, fillTransparency)
+                        color resCol = volAtPivot ? color.from_gradient(math.abs(volP), 0, windowExtreme(confirmPivot, true, false), color(na), fullCol) : color.from_gradient(Vol, windowExtreme(0, false, true), 0, fullCol, color(na))
+                        string volText = showVolInBox ? "Vol: " + str.tostring(volAtPivot ? volP : Vol, format.volume) : ""
+                        brokenRess := pushLevel(ress, false, pivotHigh, pivotHigh + atr * boxSizeMult, resCol, volText, brokenRess)
+                        newRes := true
+
+// ---------------------------------------------------------------------
+// MISE A JOUR : 7 comparaisons par cote ; les niveaux ne sont parcourus
+// que si la bougie a traverse un seuil (ou si un niveau vient d'etre cree)
+// ---------------------------------------------------------------------
+if runOnBar
+    if newSup or low > sHoldUp or low <= sHoldDn or high < sBrkDn or high >= sBrkUp or (high > sRejLo and close < sRejHi) or bar_index >= sExpAt
+        if array.size(sups) > 0
+            [nb, hDn, hUp, bDn, bUp, rLo, rHi, xAt] = scanSup(brokenSups)
+            brokenSups := nb
+            sHoldDn := hDn
+            sHoldUp := hUp
+            sBrkDn := bDn
+            sBrkUp := bUp
+            sRejLo := rLo
+            sRejHi := rHi
+            sExpAt := xAt
+    if newRes or high < rHoldDn or high >= rHoldUp or low > rBrkUp or low <= rBrkDn or (low < rRejHi and close > rRejLo) or bar_index >= rExpAt
+        if array.size(ress) > 0
+            [nb, hDn, hUp, bDn, bUp, rLo, rHi, xAt] = scanRes(brokenRess)
+            brokenRess := nb
+            rHoldDn := hDn
+            rHoldUp := hUp
+            rBrkDn := bDn
+            rBrkUp := bUp
+            rRejLo := rLo
+            rRejHi := rHi
+            rExpAt := xAt
+    // Rendu : uniquement sur la derniere bougie (bords droits, niveau le plus proche).
+    // Graphique en minutes ou plus : bord droit « rightPad » bougies apres la bougie
+    // en cours, une barre de plus a chaque cloture (la bougie qui s'ouvre ensuite est
+    // deja dans la boite, et rien n'est recalcule pendant qu'elle se forme).
+    // Graphique en ticks / range / secondes : voir liveRight().
+    if renderNow
+        int rightX = irregular ? liveRight() : bar_index + padHere + (barstate.isconfirmed ? 1 : 0)
+        float nearestSup = renderSide(sups, true, rightX)
+        float nearestRes = renderSide(ress, false, rightX)
+        rightDone := rightX
+        updateMarker(supMark, extendNearest ? nearestSup : na, supportColorInput)
+        updateMarker(resMark, extendNearest ? nearestRes : na, resistanceColorInput)
+
+// Mode eco, bougie en formation : le moteur ne tourne pas. Seul le bord droit est tenu.
+//   ticks / range / secondes : a chaque mise a jour (sauf marge a 0 : rien a faire) ;
+//   minutes et plus : seulement si les boites s'arretent trop tot (cas rare).
+if not runOnBar
+    if padHere > 0
+        if irregular
+            extendBoxes(liveRight())
+        else
+            if rightDone < bar_index + padHere
+                extendBoxes(bar_index + padHere)
+
+// Une seule alerte par cloture, contenant toutes les cassures de la barre.
+if array.size(breakMessages) > 0
+    if alertBreaks and barstate.isconfirmed
+        alert("Cassure(s) SR sur " + syminfo.ticker + " (" + timeframe.period + ")\n" + array.join(breakMessages, "\n"), alert.freq_once_per_bar_close)
+    array.clear(breakMessages)
+
+// ---------------------------------------------------------------------
+// GARDE-FOU : flux sans volume, le filtre de volume ne laisse rien passer
+// ---------------------------------------------------------------------
+var table warnTbl = na
+if barstate.islast
+    if not volSeen
+        if na(warnTbl)
+            warnTbl := table.new(position.top_right, 1, 1)
+        table.cell(warnTbl, 0, 0, "⚠ Pas de volume exploitable sur ce flux — aucune boite ne peut etre creee",
+             text_color=color.orange, text_size=size.small, bgcolor=color.new(color.black, 30))
+    else
+        if not na(warnTbl)
+            table.delete(warnTbl)
+            warnTbl := na
