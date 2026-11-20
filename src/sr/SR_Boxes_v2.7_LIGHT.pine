@@ -32,8 +32,11 @@
 //
 //  Retouche du 20/11 (affichage seulement) :
 //   9) Bord droit des boites : il s'arretait au milieu de la bougie en cours
-//      (mode eco). Il va maintenant une bougie plus loin que la bougie en
-//      cours, comme dans l'indicateur d'origine. Aucun signal ne change.
+//      (mode eco). Il va maintenant plus loin que la bougie en cours.
+//  10) Une bougie d'avance : la bougie s'affiche avant que l'indicateur soit
+//      mis a jour, et pendant ce retard la boite s'arretait de nouveau au
+//      milieu. Nouveau reglage (le dernier) « Marge a droite des boites »,
+//      2 par defaut. Aucun signal ne change.
 // =====================================================================
 //@version=5
 indicator("SR Boxes + v2.7 LIGHT", shorttitle="SR+ 2.7", overlay=true, max_boxes_count=500, max_labels_count=500, max_lines_count=500, max_bars_back=5000)
@@ -82,6 +85,10 @@ bool ecoRealtime = input.bool(true, "Mode eco temps reel : evenements a la clotu
 // --- ALERTES ---
 bool alertBreaks = input.bool(true, "Alerte sur cassure de niveau", group="Alertes",
      tooltip="Utilise la fonction alert() : dans TradingView, creer l'alerte sur cet indicateur avec la condition « Any alert() function call ». Se declenche a la cloture de la barre de cassure.")
+
+// --- BOITES (suite) : declare en dernier pour ne pas decaler les reglages deja enregistres ---
+int rightPad = input.int(2, "Marge a droite des boites (bougies)", minval=1, maxval=50, group="Boites",
+     tooltip="Nombre de bougies entre la bougie en cours et le bord droit des boites. 2 (defaut) : quand une nouvelle bougie s'ouvre, elle est deja dans la boite, meme si l'indicateur se met a jour avec un peu de retard. 1 : comme l'indicateur d'origine, mais la boite peut s'arreter au milieu de la bougie a chaque nouvelle bougie. Sur un graphique tres rapide (secondes, ticks), monter a 3 ou plus.")
 
 textSize           = textSizeInput == "Petit" ? size.small : textSizeInput == "Normal" ? size.normal : size.large
 brokenTransparency = math.min(fillTransparency + 50, 95)
@@ -494,13 +501,14 @@ if runOnBar
             rRejHi := rHi
             rExpAt := xAt
     // Rendu : uniquement sur la derniere bougie (bords droits, niveau le plus proche).
-    // Le bord droit va une bougie plus loin que la derniere bougie affichee.
-    // A une cloture suivie d'une nouvelle bougie, il vise donc deux barres plus
-    // loin : la bougie qui se forme ensuite reste entierement dans la boite,
-    // sans aucun calcul pendant sa formation.
+    // Le bord droit est pose « rightPad » bougies apres la derniere bougie affichee.
+    // A une cloture suivie d'une nouvelle bougie, il compte une barre de plus :
+    // la bougie qui s'ouvre ensuite est deja dans la boite, meme si ce calcul
+    // arrive a l'ecran avec un peu de retard, et rien n'est recalcule pendant
+    // qu'elle se forme.
     if renderNow
         bool nextBarComing = barstate.isconfirmed and (barstate.isrealtime or not barstate.islast)
-        int rightX = bar_index + (nextBarComing ? 2 : 1)
+        int rightX = bar_index + rightPad + (nextBarComing ? 1 : 0)
         float nearestSup = renderSide(sups, true, rightX)
         float nearestRes = renderSide(ress, false, rightX)
         rightDone := rightX
@@ -510,8 +518,8 @@ if runOnBar
 // Mode eco, bougie en formation : rien a calculer, sauf si les boites s'arretent
 // avant la fin de cette bougie (graphique charge marche ferme, puis reouverture).
 if not runOnBar
-    if rightDone < bar_index + 1
-        extendBoxes(bar_index + 1)
+    if rightDone < bar_index + rightPad
+        extendBoxes(bar_index + rightPad)
 
 // Une seule alerte par cloture, contenant toutes les cassures de la barre.
 if array.size(breakMessages) > 0

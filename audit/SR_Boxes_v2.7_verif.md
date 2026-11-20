@@ -1,6 +1,6 @@
 # SR Boxes + v2.7 LIGHT : allègement de la v2.6 RANGE (20/11)
 
-Fichier livré : `src/sr/SR_Boxes_v2.7_LIGHT.pine` (Pine v5, 536 lignes). **Non compilé ici**,
+Fichier livré : `src/sr/SR_Boxes_v2.7_LIGHT.pine` (Pine v5, 544 lignes). **Non compilé ici**,
 aucune mesure TradingView : le gain est à lire dans le Profiler (§ 5).
 
 Référence : la v2.6 RANGE collée le 20/11 (0,7 s au Profiler ; bloc `if runOnBar` 37,2 %,
@@ -127,3 +127,43 @@ Remarque, sans changement de code : sur la capture de la v2.7, la boîte commenc
 avant la bougie du pivot. C'est l'écart entre les réglages « Lookback » et « Pivot de
 confirmation ». Avec deux valeurs égales, la boîte commence sur la bougie du pivot, comme
 sur la capture de référence.
+
+## 7. Seconde retouche du 20/11 : une bougie d'avance
+
+Retour après le § 6 : « c'est mieux, mais des fois ça recommence comme avant ».
+
+Cause la plus probable (déduite, non observée sur TradingView) : une nouvelle bougie
+s'affiche dès son premier tick, alors que le résultat du script arrive un peu après. Avec le
+§ 6, le bord posé à la clôture précédente tombait exactement au centre de la bougie qui
+s'ouvre. La boîte s'arrêtait donc au milieu de chaque nouvelle bougie pendant ce retard,
+puis se corrigeait. Plus la plateforme est chargée, plus cela dure et se voit. L'indicateur
+d'origine a le même défaut (il pose le bord une barre plus loin à chaque tick).
+
+Correction (affichage seulement, moteur et signaux non touchés) : nouveau réglage, déclaré
+en dernier pour ne pas décaler les réglages enregistrés, « Marge à droite des boîtes
+(bougies) », 2 par défaut. Le bord droit est posé à ce nombre de bougies après la bougie en
+cours. Avec 2, la bougie qui s'ouvre est déjà dans la boîte avant toute mise à jour.
+
+Modèle `bord_droit.py` (exécutions du script, retour arrière entre deux ticks, résultat
+affiché en retard). Bougies qui s'ouvrent avec la boîte arrêtée avant leur bord droit :
+
+| Version | Résultat en retard de moins d'une bougie | En retard d'une bougie entière |
+|---|---|---|
+| v2.6 et première v2.7 | toutes, et pendant toute la bougie | toutes |
+| Retouche du § 6 | toutes, le temps du retard | toutes |
+| Marge 1 | toutes, le temps du retard | toutes |
+| Marge 2 (défaut) | aucune (0 sur 29) | toutes |
+| Marge 3 | aucune | aucune (0 sur 28) |
+
+Mêmes résultats en mode éco et hors mode éco. Cas vérifiés avec la marge 2 : marché fermé
+au chargement puis réouverture, et clôtures non exécutées sur trois bougies : 0 bougie hors
+boîte.
+
+À savoir :
+
+- La marge 2 suffit tant que le retard d'affichage reste plus court qu'une bougie : toujours
+  le cas en 1 minute et plus. Sur un graphique en secondes ou en ticks, le retard peut
+  dépasser une bougie : monter le réglage à 3 ou plus.
+- En contrepartie la boîte dépasse la bougie en cours de deux bougies au lieu d'une (une
+  seule pendant l'instant qui suit l'ouverture d'une bougie).
+- Marché fermé : la boîte finit deux bougies après la dernière.
