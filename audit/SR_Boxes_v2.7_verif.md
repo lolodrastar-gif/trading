@@ -323,3 +323,27 @@ Ce que fait la v2.10 :
   dépendre de la façon dont TradingView centre le texte d'une boîte prolongée (non vérifié).
 - Graphiques en minutes et plus : inchangé. Graphiques en secondes : marge générale, fixe.
 - Le graphique doit afficher « SR+ 2.10 ».
+
+## 11. v2.11 : la v2.9 avec le bord droit fixe (20/11)
+
+Fichier : `src/sr/SR_Boxes_v2.11.pine` (587 lignes). **Non compilé ici.**
+
+Retour après le § 10 : « non, comme ça mais fixe, c'est tout, rien d'autre », avec la v2.9
+recollée et une capture où la boîte finit 4 emplacements après la bougie. Le prolongement
+jusqu'au bord droit de l'écran (v2.10) est donc refusé : la boîte doit finir près de la
+bougie, sans bouger.
+
+Ce que fait la v2.11, à partir du fichier v2.9 et sans autre changement :
+
+- en ticks, en range et en secondes, le bord droit est posé à distance constante de la
+  bougie en cours, à chaque mise à jour : marge + 2 emplacements en ticks et en range (4
+  avec la marge 2, comme sur la capture), marge en secondes ;
+- la mesure de l'âge de la bougie (`varip`, `timenow`) est retirée ;
+- le graphique doit afficher « SR+ 2.11 ».
+
+Conséquence, déjà chiffrée au § 10 (colonne « bord jamais allongé ») : un emplacement vaut
+une seconde, donc après une bougie qui a duré plus longtemps que la distance choisie, la
+bougie suivante s'ouvre hors de la boîte jusqu'à la mise à jour suivante. Modèle, bougies de
+3,5 s en moyenne, retard d'affichage 0,3 s : 3,6 % du temps avec 4 emplacements, 0,8 % avec
+8, 0,3 % avec 12. L'indicateur d'origine a le même comportement avec 1 emplacement. C'est la
+contrepartie d'une boîte à la fois courte et fixe sur un graphique en ticks.
