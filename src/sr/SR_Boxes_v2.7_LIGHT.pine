@@ -102,7 +102,7 @@ type Marker
     float lastLvl
 
 // Valeurs « jamais atteintes » : un seuil a BIG ne declenche rien.
-float BIG   = 1e300
+float BIG   = 1.0e300
 int   NEVER = 2000000000
 
 var array<SRLevel> sups = array.new<SRLevel>()
