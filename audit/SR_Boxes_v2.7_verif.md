@@ -167,3 +167,56 @@ boîte.
 - En contrepartie la boîte dépasse la bougie en cours de deux bougies au lieu d'une (une
   seule pendant l'instant qui suit l'ouverture d'une bougie).
 - Marché fermé : la boîte finit deux bougies après la dernière.
+
+## 8. v2.8 : bord droit durci et version visible (20/11)
+
+Fichier : `src/sr/SR_Boxes_v2.8.pine` (550 lignes). Le fichier v2.7 reste tel qu'il était au
+§ 7. Affichage seulement : moteur, signaux et réglages identiques. **Non compilé ici.**
+
+Retour après le § 7 : « toujours le même problème, ça déconne parfois », avec une capture où
+les deux boîtes finissent au centre exact de la dernière bougie (bord à 354 px, bougie
+341 – 367), puis une capture « comme ça que je veux » où elles finissent deux bougies après
+la dernière.
+
+Constat : la capture en défaut n'est pas reproductible avec le fichier du § 7. La boîte
+rouge y est née à la clôture de l'avant-dernière bougie (pivot à 2 bougies, lookback 5) et
+ce même passage pose le bord droit au moins deux barres plus loin. Elle correspond en
+revanche au fichier du § 6 (bord posé une barre plus loin). Deux explications possibles,
+non départagées ici :
+
+1. ce graphique tournait encore avec le code précédent ;
+2. TradingView n'annonce pas les états de bougie comme le manuel le décrit (« dernière
+   bougie », « temps réel » à la clôture), ce qui faussait la règle du § 6 et du § 7.
+
+Ce que fait la v2.8 :
+
+- **Numéro de version dans le nom** : le graphique affiche « SR+ 2.8 ». Si ce n'est pas ce
+  qui est écrit, le graphique ne tourne pas avec ce fichier.
+- **Bord droit sans condition d'état** : à chaque clôture il est posé à la marge plus une
+  barre ; pendant la bougie, à la marge. Seul `barstate.isconfirmed` est utilisé, comme le
+  mode éco lui-même.
+- **Rendu sur les dernières bougies quel que soit l'état annoncé** (`islast`,
+  `islastconfirmedhistory`, `isrealtime` ou distance à `last_bar_index`).
+- **Boîte neuve ou réutilisée** : créée directement à la bonne longueur.
+
+Modèle `bord_droit_v28.py` : 16 façons d'annoncer les états × mode éco oui / non, avec une
+boîte créée en direct. Distance entre la bougie affichée et le bord droit, pire cas :
+
+| Version | Résultat à l'heure ou en retard de moins d'une bougie | En retard d'une bougie entière |
+|---|---|---|
+| § 6 | boîte arrêtée au milieu ou avant, dans les 32 cas | idem |
+| § 7, marge 2 | 16 cas sur 32 en défaut (boîtes qui reculent si la clôture n'est pas annoncée « dernière bougie ») | milieu de bougie |
+| v2.8, marge 2 | 1 bougie après, dans les 32 cas | milieu de bougie |
+| v2.8, marge 3 | 2 bougies après | 1 bougie après |
+
+Avec les états annoncés comme dans le manuel et sans retard : § 6 milieu de bougie à chaque
+ouverture ; § 7 et v2.8 une bougie après à l'ouverture, deux ensuite.
+
+À savoir :
+
+- Marché fermé, la boîte finit trois bougies après la dernière (marge 2 plus la barre de la
+  clôture).
+- Reste hors de portée : un affichage en retard d'une bougie entière ou plus (graphique en
+  secondes ou en ticks). Remède : monter la marge.
+- Si le défaut revient alors que le graphique affiche bien « SR+ 2.8 » : noter l'unité de
+  temps, la valeur de la marge, et si la boîte se corrige seule au bout d'un instant.
