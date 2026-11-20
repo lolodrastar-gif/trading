@@ -220,3 +220,71 @@ ouverture ; § 7 et v2.8 une bougie après à l'ouverture, deux ensuite.
   secondes ou en ticks). Remède : monter la marge.
 - Si le défaut revient alors que le graphique affiche bien « SR+ 2.8 » : noter l'unité de
   temps, la valeur de la marge, et si la boîte se corrige seule au bout d'un instant.
+
+## 9. v2.9 : graphiques en ticks (20/11)
+
+Fichier : `src/sr/SR_Boxes_v2.9.pine` (595 lignes). Affichage seulement : moteur, signaux et
+réglages identiques. **Non compilé ici.**
+
+Retour après le § 8 : « ça déconne toujours », avec une capture datée, puis « je suis sur
+100 tick ».
+
+### Cause
+
+Elle se lit sur l'axe du temps de la capture : les bougies durent 3 à 5 s (18:04:36,
+18:04:47, 18:04:54 toutes les deux bougies), alors que les emplacements à droite de la
+dernière bougie avancent de 1 s chacun (18:04:56, 18:04:58, 18:05). Sur un graphique en
+ticks, TradingView place donc ce qui dépasse la dernière bougie selon l'heure, pas selon le
+nombre de bougies.
+
+Conséquence : un bord droit posé « 3 barres après la bougie qui clôture » est en réalité
+posé 3 secondes après l'ouverture de cette bougie. Si elle a duré 3 s, le bord tombe sur la
+bougie suivante ; si elle a duré plus, il reste derrière. Les trois captures en défaut
+(§ 6, § 7, § 8) s'expliquent ainsi avec des bougies de 2 à 3,5 s ; la capture « comme ça que
+je veux » correspond à des bougies d'environ 1 s.
+
+**Correction des § 7 et § 8** : le retard d'affichage et l'hypothèse d'un ancien code
+n'étaient pas la bonne explication. La marge comptée en bougies ne pouvait pas suffire sur
+un graphique en ticks.
+
+Limite : c'est une déduction (axe du temps, trois captures cohérentes), pas un comportement
+documenté ni observé ici. Hypothèse du modèle : l'ancre horaire n'est renvoyée à l'écran
+que si l'indice du bord change.
+
+### Ce que fait la v2.9
+
+- Graphiques en ticks, en range ou en secondes : le bord droit est posé à « marge »
+  emplacements après l'instant présent, et rafraîchi à chaque mise à jour, y compris en
+  mode éco (au plus 20 appels de dessin, le moteur ne tourne toujours qu'à la clôture). Il
+  avance d'un emplacement par seconde tant que la bougie dure et revient à la marge à
+  chaque nouvelle bougie. L'âge de la bougie est mesuré à l'horloge depuis la première
+  mise à jour vue (variable `varip`), donc sans dépendre d'un flux en différé.
+- Graphiques en minutes et plus : règle du § 8, inchangée.
+- Marge à 0 : boîtes prolongées jusqu'au bord droit de l'écran (`extend.right`), sans
+  aucune mise à jour.
+- Le graphique doit afficher « SR+ 2.9 ».
+
+### Modèle `bord_droit_ticks.py`
+
+Part du temps où la bougie en cours dépasse de la boîte, retard d'affichage 0,3 s :
+
+| Durée moyenne des bougies | v2.8 | v2.9 | Marge moyenne affichée en v2.9 |
+|---|---|---|---|
+| 0,5 s | 4,5 % | 0,0 % | 2,3 emplacements |
+| 1,5 s | 30,2 % | 0,0 % | 3,4 |
+| 3,5 s | 63,9 % | 0,0 % | 5,4 |
+| 10 s | 94,5 % | 0,0 % | 11,9 |
+
+v2.9, bougies de 3,5 s, selon le retard d'affichage : 0,0 % à 0,3 s ; 0,5 % à 1 s ; 18 % à
+2 s (la marge de 2 s est alors consommée : monter la marge à 3 ou 4).
+
+Variante écartée : marge fixe plus la durée des bougies récentes. Même taux, mais boîtes
+deux fois plus longues (10,3 emplacements pour des bougies de 3,5 s).
+
+### À savoir
+
+- Sur un graphique en ticks, le rendu « exactement 2 bougies après, en permanence » n'existe
+  pas : l'emplacement à droite est une seconde, pas une bougie. La boîte finit 2
+  emplacements après la bougie à son ouverture, puis s'allonge tant qu'elle dure.
+- Sur un marché lent (bougies de 30 s et plus), la boîte s'allonge d'autant ; plafond à 300
+  emplacements.
