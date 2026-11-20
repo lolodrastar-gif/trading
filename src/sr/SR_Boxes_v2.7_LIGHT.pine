@@ -29,6 +29,11 @@
 //   6) Le bord gauche d'une boite ne peut plus sortir de l'historique.
 //   7) Fenetre du gradient limitee a 2500 (tampon de 5000 barres).
 //   8) Le bandeau « pas de volume » n'est cree que s'il est utile.
+//
+//  Retouche du 20/11 (affichage seulement) :
+//   9) Bord droit des boites : il s'arretait au milieu de la bougie en cours
+//      (mode eco). Il va maintenant une bougie plus loin que la bougie en
+//      cours, comme dans l'indicateur d'origine. Aucun signal ne change.
 // =====================================================================
 //@version=5
 indicator("SR Boxes + v2.7 LIGHT", shorttitle="SR+ 2.7", overlay=true, max_boxes_count=500, max_labels_count=500, max_lines_count=500, max_bars_back=5000)
@@ -112,6 +117,7 @@ var Marker resMark = Marker.new()
 var array<string> breakMessages = array.new_string()
 var int brokenSups = 0
 var int brokenRess = 0
+var int rightDone  = 0   // derniere barre jusqu'ou les boites ont ete prolongees
 
 // Seuils exacts, recalcules a chaque parcours. Tant que la bougie reste
 // entre « Dn » et « Up », aucun niveau n'a ete traverse : rien a faire.
@@ -364,10 +370,9 @@ scanRes(int brokenBefore) =>
 
 // Rendu (derniere bougie seulement) : bord droit des boites et niveau actif
 // le plus proche du prix, du bon cote.
-renderSide(array<SRLevel> arr, bool isSup) =>
+renderSide(array<SRLevel> arr, bool isSup, int rightX) =>
     float nearest = na
     float bestD = na
-    int rightX = bar_index + 1
     for L in arr
         box.set_right(L.bx, rightX)
         if not L.broken
@@ -380,6 +385,14 @@ renderSide(array<SRLevel> arr, bool isSup) =>
                     bestD := d
                     nearest := L.lvl
     nearest
+
+// Prolonge toutes les boites jusqu'a la barre rightX (cas rare, voir plus bas).
+extendBoxes(int rightX) =>
+    for L in sups
+        box.set_right(L.bx, rightX)
+    for L in ress
+        box.set_right(L.bx, rightX)
+    rightX
 
 // Ligne pointillee et etiquette du niveau le plus proche. L'etiquette est
 // recreee a chaque rendu : toujours la plus recente, jamais purgee par la
@@ -481,11 +494,24 @@ if runOnBar
             rRejHi := rHi
             rExpAt := xAt
     // Rendu : uniquement sur la derniere bougie (bords droits, niveau le plus proche).
+    // Le bord droit va une bougie plus loin que la derniere bougie affichee.
+    // A une cloture suivie d'une nouvelle bougie, il vise donc deux barres plus
+    // loin : la bougie qui se forme ensuite reste entierement dans la boite,
+    // sans aucun calcul pendant sa formation.
     if renderNow
-        float nearestSup = renderSide(sups, true)
-        float nearestRes = renderSide(ress, false)
+        bool nextBarComing = barstate.isconfirmed and (barstate.isrealtime or not barstate.islast)
+        int rightX = bar_index + (nextBarComing ? 2 : 1)
+        float nearestSup = renderSide(sups, true, rightX)
+        float nearestRes = renderSide(ress, false, rightX)
+        rightDone := rightX
         updateMarker(supMark, extendNearest ? nearestSup : na, supportColorInput)
         updateMarker(resMark, extendNearest ? nearestRes : na, resistanceColorInput)
+
+// Mode eco, bougie en formation : rien a calculer, sauf si les boites s'arretent
+// avant la fin de cette bougie (graphique charge marche ferme, puis reouverture).
+if not runOnBar
+    if rightDone < bar_index + 1
+        extendBoxes(bar_index + 1)
 
 // Une seule alerte par cloture, contenant toutes les cassures de la barre.
 if array.size(breakMessages) > 0

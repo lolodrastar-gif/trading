@@ -1,6 +1,6 @@
 # SR Boxes + v2.7 LIGHT : allègement de la v2.6 RANGE (20/11)
 
-Fichier livré : `src/sr/SR_Boxes_v2.7_LIGHT.pine` (Pine v5, 509 lignes). **Non compilé ici**,
+Fichier livré : `src/sr/SR_Boxes_v2.7_LIGHT.pine` (Pine v5, 536 lignes). **Non compilé ici**,
 aucune mesure TradingView : le gain est à lire dans le Profiler (§ 5).
 
 Référence : la v2.6 RANGE collée le 20/11 (0,7 s au Profiler ; bloc `if runOnBar` 37,2 %,
@@ -93,3 +93,37 @@ bougie en cours.
 3. Profiler : temps total, et part du bloc `if runOnBar`.
 4. Alertes : une alerte garde le script du moment où elle a été créée. Recréer celles de la
    v2.6 sur la v2.7 et supprimer les anciennes.
+
+## 6. Retouche du 20/11 : bord droit des boîtes
+
+Demande : boîtes « décalées », la bougie passe à côté de la boîte. Mesure sur les deux
+captures :
+
+- capture de référence : la boîte finit une bougie après la dernière bougie (bord à 918 px,
+  dernière bougie centrée à 883 px, pas de 35 px) ;
+- capture de la v2.7 : la boîte finit au centre exact de la bougie en cours (teinte de la
+  boîte jusqu'à la colonne 532, centre de la bougie 518 – 546). La moitié droite de la bougie
+  est hors de la boîte.
+
+Cause : en mode éco le script n'agit qu'à la clôture et posait le bord droit une barre plus
+loin. Cette barre devient aussitôt la bougie en formation. La v2.6 faisait la même chose.
+
+Correction (affichage seulement, aucun signal modifié, moteur non touché) :
+
+- à une clôture suivie d'une nouvelle bougie, le bord droit est posé deux barres plus loin :
+  la bougie en formation est entièrement dans la boîte, sans calcul pendant sa formation ;
+- marché fermé (dernière bougie du graphique) : une barre plus loin, comme la référence ;
+- graphique chargé marché fermé puis réouverture : seul cas où le script prolonge les boîtes
+  pendant la bougie en cours, jusqu'à sa clôture.
+
+Vérifié par un petit modèle des états de bougie (historique, ticks, clôture, retour arrière
+entre deux ticks) : dans les 6 cas (mode éco oui / non × marché ouvert, fermé, réouverture),
+la boîte finit toujours une bougie après la bougie affichée. Non observé sur TradingView.
+
+Non modifié : l'étiquette de prix du niveau le plus proche reste posée sur la dernière
+bougie clôturée.
+
+Remarque, sans changement de code : sur la capture de la v2.7, la boîte commence 3 bougies
+avant la bougie du pivot. C'est l'écart entre les réglages « Lookback » et « Pivot de
+confirmation ». Avec deux valeurs égales, la boîte commence sur la bougie du pivot, comme
+sur la capture de référence.
