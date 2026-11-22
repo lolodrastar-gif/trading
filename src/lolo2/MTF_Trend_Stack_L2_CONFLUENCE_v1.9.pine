@@ -1,0 +1,479 @@
+//@version=6
+// MTF Trend Stack - Lolo 2 CONFLUENCE v1.9 - tableau unique + CHOP
+// Un seul tableau: 6 tendances MTF + mesures Quality, sans doublons.
+// CHOP 14: longueur de chemin (somme TR) / amplitude du prix sur N bougies.
+// Toutes les valeurs MTF/Quality utilisent la derniere bougie CLOTUREE.
+// Le CHOP est informatif et ne modifie PAS les 2 alertes d'alignement EMA.
+// Vert/rouge = acheteur/vendeur; orange = vigilance; gris = neutre.
+// Reglages par defaut adaptes a la capture: 5s/10s/15s/30s/45s/1m,
+// Market Quality 30s et confirmation 1m (personnalisables).
+indicator("MTF Trend Stack - Lolo 2 CONFLUENCE v1.9", shorttitle = "MTF Stack L2", overlay = true)
+
+const color COLOR_HEADER = #374151
+const color COLOR_WARNING = #B45309
+const color COLOR_NEUTRAL = #4B5563
+const color COLOR_EMA_SLOW = #A3A8B1
+
+// --- Inputs
+string GRP_ENGINE = "Trend Engine"
+int emaFastLen = input.int(11, "EMA Fast", minval = 1, group = GRP_ENGINE)
+int emaSlowLen = input.int(29, "EMA Slow", minval = 1, group = GRP_ENGINE)
+bool useConfirm = input.bool(true, "Confirm: price vs slow EMA", group = GRP_ENGINE,
+     tooltip = "Bull: fast EMA > slow EMA AND close > slow EMA. Bear: mirror.")
+float flatPct = input.float(0.0, "Neutral band (% of slow EMA)", minval = 0.0, step = 0.05, group = GRP_ENGINE,
+     tooltip = "An EMA gap smaller than this percent counts as FLAT. 0 = disabled.")
+
+string GRP_TF = "Timeframes"
+string tf1 = input.timeframe("5S", "TF 1", group = GRP_TF)
+string tf2 = input.timeframe("10S", "TF 2", group = GRP_TF)
+string tf3 = input.timeframe("15S", "TF 3", group = GRP_TF)
+string tf4 = input.timeframe("30S", "TF 4", group = GRP_TF)
+string tf5 = input.timeframe("45S", "TF 5", group = GRP_TF)
+string tf6 = input.timeframe("1", "TF 6", group = GRP_TF)
+
+string GRP_UI = "Display"
+string posInp = input.string("Top Right", "Table position",
+     options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left", "Middle Right"], group = GRP_UI)
+string sizeInp = input.string("Normal", "Text size",
+     options = ["Tiny", "Small", "Normal", "Large"], group = GRP_UI)
+bool plotEmas = input.bool(true, "Plot current-TF EMAs (sanity check)", group = GRP_UI)
+
+// --- Timeframe validity: six distinct time-based contexts.
+// On a tick chart the temporal order of tick bars versus minutes is not
+// expressed by timeframe.in_seconds(); the selected time TFs are still used.
+if barstate.isfirst
+    if emaFastLen >= emaSlowLen
+        runtime.error("EMA Fast must be strictly shorter than EMA Slow (e.g. 11 < 29).")
+    array<int> secondsList = array.from(timeframe.in_seconds(tf1), timeframe.in_seconds(tf2),
+         timeframe.in_seconds(tf3), timeframe.in_seconds(tf4),
+         timeframe.in_seconds(tf5), timeframe.in_seconds(tf6))
+    int chartSeconds = timeframe.isticks ? na : timeframe.in_seconds()
+    for i = 0 to array.size(secondsList) - 1
+        int tfSeconds = array.get(secondsList, i)
+        if na(tfSeconds)
+            runtime.error("Select six time-based timeframes, e.g. 5, 15, 60, 240, D, W.")
+        if not timeframe.isticks and tfSeconds < chartSeconds
+            runtime.error("A selected timeframe is LOWER than the chart timeframe. Use an equal/higher timeframe or the 100T chart.")
+        if i > 0
+            for j = 0 to i - 1
+                if tfSeconds == array.get(secondsList, j)
+                    runtime.error("Two selected timeframes represent the same duration. Choose six distinct timeframes.")
+
+// --- EMA trend engine: unchanged decision rules.
+f_trendState() =>
+    float emaFast = ta.ema(close, emaFastLen)
+    float emaSlow = ta.ema(close, emaSlowLen)
+    float gapPct = math.abs(emaSlow) > 0.0 ? math.abs(emaFast - emaSlow) / math.abs(emaSlow) * 100.0 : na
+    bool isFlat = flatPct > 0.0 and gapPct < flatPct
+    bool bullRaw = emaFast > emaSlow and (not useConfirm or close > emaSlow)
+    bool bearRaw = emaFast < emaSlow and (not useConfirm or close < emaSlow)
+    na(emaFast) or na(emaSlow) or emaSlow == 0.0 ? int(na) : isFlat ? 0 : bullRaw ? 1 : bearRaw ? -1 : 0
+
+// Request the previous CLOSED bar in the requested TF. This is the
+// documented non-repainting HTF pattern; NOT a future leak.
+f_state(simple string tf) =>
+    request.security(syminfo.tickerid, tf, f_trendState()[1],
+         gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+
+int s1 = f_state(tf1)
+int s2 = f_state(tf2)
+int s3 = f_state(tf3)
+int s4 = f_state(tf4)
+int s5 = f_state(tf5)
+int s6 = f_state(tf6)
+
+array<int> states = array.from(s1, s2, s3, s4, s5, s6)
+array<string> tfs = array.from(tf1, tf2, tf3, tf4, tf5, tf6)
+
+int bulls = 0
+int bears = 0
+int valid = 0
+for i = 0 to array.size(states) - 1
+    int state = array.get(states, i)
+    if not na(state)
+        valid += 1
+        bulls += state == 1 ? 1 : 0
+        bears += state == -1 ? 1 : 0
+int net = bulls - bears
+bool allAvailable = valid == 6
+bool fullBull = allAvailable and bulls == 6
+bool fullBear = allAvailable and bears == 6
+
+// --- Helpers
+f_tfLabel(string tf) =>
+    switch tf
+        "" => "Chart"
+        "1S" => "1s"
+        "5S" => "5s"
+        "10S" => "10s"
+        "15S" => "15s"
+        "30S" => "30s"
+        "45S" => "45s"
+        "1" => "1m"
+        "3" => "3m"
+        "5" => "5m"
+        "15" => "15m"
+        "30" => "30m"
+        "45" => "45m"
+        "60" => "1h"
+        "120" => "2h"
+        "180" => "3h"
+        "240" => "4h"
+        "D" => "1D"
+        "W" => "1W"
+        "M" => "1M"
+        => tf
+
+f_stateTxt(int state) => na(state) ? "N/A" : state == 1 ? "BULL ▲" : state == -1 ? "BEAR ▼" : "FLAT –"
+f_stateCol(int state) => na(state) ? color.new(color.gray, 65) : state == 1 ? color.teal : state == -1 ? color.red : color.new(color.gray, 30)
+
+tblPos = switch posInp
+    "Top Right" => position.top_right
+    "Top Left" => position.top_left
+    "Bottom Right" => position.bottom_right
+    "Bottom Left" => position.bottom_left
+    "Middle Right" => position.middle_right
+    => position.top_right
+
+tblSize = switch sizeInp
+    "Tiny" => size.tiny
+    "Small" => size.small
+    "Normal" => size.normal
+    "Large" => size.large
+    => size.normal
+
+// Chart TF EMAs are visual references only, NOT the EMA values from the 6 HTFs.
+float chartFastEma = ta.ema(close, emaFastLen)
+float chartSlowEma = ta.ema(close, emaSlowLen)
+plot(plotEmas ? chartFastEma : na, "EMA Fast (chart TF)", color = COLOR_WARNING)
+plot(plotEmas ? chartSlowEma : na, "EMA Slow (chart TF)", color = COLOR_EMA_SLOW)
+
+// Alerts on confirmed chart bars, using only confirmed requested-TF states.
+// Use TradingView alert frequency "Once Per Bar Close" as an additional guard.
+alertcondition(barstate.isconfirmed and fullBull and not fullBull[1], "Full Bull Stack",
+     "{{ticker}} FULL BULL STACK (all six timeframes confirmed bullish)")
+alertcondition(barstate.isconfirmed and fullBear and not fullBear[1], "Full Bear Stack",
+     "{{ticker}} FULL BEAR STACK (all six timeframes confirmed bearish)")
+
+
+
+// ============================================================================
+// MARCHE / QUALITE : calculs en TF demandee, etats CONFIRMES uniquement.
+// Une SEULE table 4 x 9 regroupe MTF et Market Quality.
+// CHOP : jauge de marche hache; ce n'est pas un signal d'entree.
+// ============================================================================
+
+string MQ_GROUP = "Market Quality - timeframes"
+string mqTf = input.timeframe("30S", "Quality timeframe", group = MQ_GROUP,
+     tooltip = "Derniere bougie CLOTUREE. Par defaut 30 secondes, comme sur ta capture.")
+bool mqUseConfirm = input.bool(true, "Confirm direction and strength on a second timeframe", group = MQ_GROUP)
+string mqConfirmTf = input.timeframe("1", "Confirmation timeframe", group = MQ_GROUP,
+     tooltip = "Derniere bougie CLOTUREE. Par defaut 1 minute.")
+
+string MQ_CALC = "Market Quality - indicators"
+int mqDiLen = input.int(14, "DMI length", minval = 2, maxval = 200, group = MQ_CALC)
+int mqAdxSmooth = input.int(14, "ADX smoothing", minval = 2, maxval = 200, group = MQ_CALC)
+int mqErLen = input.int(20, "Kaufman ER length", minval = 2, maxval = 500, group = MQ_CALC)
+int mqAtrLen = input.int(14, "ATR length", minval = 1, maxval = 500, group = MQ_CALC)
+int mqAtrBase = input.int(100, "ATR reference length", minval = 10, maxval = 1000, group = MQ_CALC,
+     tooltip = "ATR relatif = ATR / SMA(ATR, nombre de bougies). 1.00 = valeur habituelle.")
+int mqChopLen = input.int(14, "CHOP length", minval = 2, maxval = 500, group = MQ_CALC)
+
+string MQ_LIMITS = "Market Quality - seuils"
+// Anciens seuils de confirmation (18 et 0.20) conserves.
+float mqAdxNoisy = input.float(18.0, "Min ADX pour confirmation", minval = 1.0, maxval = 100.0, step = 1.0, group = MQ_LIMITS)
+float mqErNoisy = input.float(0.20, "Min ER pour confirmation", minval = 0.0, maxval = 1.0, step = 0.05, group = MQ_LIMITS)
+float chopTrendMax = input.float(38.2, "CHOP tendance si <=", minval = 0.0, maxval = 100.0, step = 0.1, group = MQ_LIMITS,
+     tooltip = "Repere heuristique, pas une probabilite de gain.")
+float chopRangeMin = input.float(61.8, "CHOP hache si >=", minval = 0.0, maxval = 100.0, step = 0.1, group = MQ_LIMITS,
+     tooltip = "Repere heuristique, pas une probabilite de gain.")
+
+if barstate.isfirst
+    int qSeconds = timeframe.in_seconds(mqTf)
+    int cSeconds = timeframe.in_seconds(mqConfirmTf)
+    if na(qSeconds) or (mqUseConfirm and na(cSeconds))
+        runtime.error("Market Quality : choisir des unites temporelles valides.")
+    if not timeframe.isticks and qSeconds < timeframe.in_seconds()
+        runtime.error("Market Quality : l'UT primaire doit etre >= a celle du graphique.")
+    if mqUseConfirm and cSeconds <= qSeconds
+        runtime.error("Market Quality : l'UT de confirmation doit etre superieure a l'UT primaire.")
+    if chopTrendMax >= chopRangeMin
+        runtime.error("CHOP : le seuil tendance doit etre inferieur au seuil de marche hache.")
+
+// Calcul exact du CHOP classique :
+// 100 * log10(somme des True Ranges / (plus haut - plus bas)) / log10(N).
+// Cas amplitude nulle ou historique incomplet : N/A, jamais une fausse tendance.
+f_chop(simple int length) =>
+    float tr = ta.tr(true)
+    float trTotal = math.sum(tr, length)
+    float spread = ta.highest(high, length) - ta.lowest(low, length)
+    float chop = na(high[length - 1]) or na(low[length - 1]) or na(trTotal) or na(spread) or spread <= 0.0 or trTotal <= 0.0 ? na :
+         100.0 * math.log10(trTotal / spread) / math.log10(length)
+    chop
+
+// Formules preexistantes ADX/DMI, ER et ATR relatif strictement preservees.
+f_mqMetrics() =>
+    [pdi, mdi, adxValue] = ta.dmi(mqDiLen, mqAdxSmooth)
+    float move = math.abs(ta.change(close))
+    float travelled = math.sum(move, mqErLen)
+    float erValue = na(close[mqErLen]) or na(travelled) ? na : travelled <= 0.0 ?
+         0.0 : math.min(1.0, math.abs(close - close[mqErLen]) / travelled)
+    float atrValue = ta.atr(mqAtrLen)
+    float atrAverage = ta.sma(atrValue, mqAtrBase)
+    float atrRelative = not na(atrAverage) and atrAverage > 0.0 ? atrValue / atrAverage : na
+    [pdi, mdi, adxValue, erValue, atrRelative]
+
+// calcChop=false pour la TF de confirmation : pas de calcul CHOP inutile.
+f_mqConfirmed(simple bool calcChop) =>
+    [pdi, mdi, adxValue, erValue, atrRelative] = f_mqMetrics()
+    float chopValue = calcChop ? f_chop(mqChopLen) : na
+    [pdi[1], mdi[1], adxValue[1], erValue[1], atrRelative[1], chopValue[1]]
+
+// Deux requetes Market Quality exactement comme avant; la premiere inclut CHOP.
+[qp, qm, qa, qe, qv, qChop] = request.security(syminfo.tickerid, mqTf, f_mqConfirmed(true),
+     gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+[cp, cm, ca, ce, cv, unusedConfirmChop] = request.security(syminfo.tickerid, mqConfirmTf, f_mqConfirmed(false),
+     gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+
+bool qReady = not na(qp) and not na(qm) and not na(qa) and not na(qe) and not na(qv)
+bool cReady = not na(cp) and not na(cm) and not na(ca) and not na(ce)
+int qDirection = not qReady ? 0 : qp > qm ? 1 : qm > qp ? -1 : 0
+int cDirection = not cReady ? 0 : cp > cm ? 1 : cm > cp ? -1 : 0
+// Confirmation identique a v1.7: direction, ADX et ER sur la TF secondaire.
+bool cAgree = cReady and cDirection == qDirection and qDirection != 0 and ca >= mqAdxNoisy and ce >= mqErNoisy
+
+// Les trois premieres UT sont le groupe court, les trois suivantes le fond.
+int fastBull = (s1 == 1 ? 1 : 0) + (s2 == 1 ? 1 : 0) + (s3 == 1 ? 1 : 0)
+int fastBear = (s1 == -1 ? 1 : 0) + (s2 == -1 ? 1 : 0) + (s3 == -1 ? 1 : 0)
+int slowBull = (s4 == 1 ? 1 : 0) + (s5 == 1 ? 1 : 0) + (s6 == 1 ? 1 : 0)
+int slowBear = (s4 == -1 ? 1 : 0) + (s5 == -1 ? 1 : 0) + (s6 == -1 ? 1 : 0)
+bool fastAvailable = not na(s1) and not na(s2) and not na(s3)
+bool slowAvailable = not na(s4) and not na(s5) and not na(s6)
+int fastBias = fastBull > fastBear ? 1 : fastBear > fastBull ? -1 : 0
+int slowBias = slowBull > slowBear ? 1 : slowBear > slowBull ? -1 : 0
+
+f_sumBias(int bias) => bias == 1 ? "BULL" : bias == -1 ? "BEAR" : "MIXTE"
+f_sumBiasColor(int bias) => bias == 1 ? color.teal : bias == -1 ? color.red : COLOR_NEUTRAL
+
+// 4 colonnes / 9 lignes, tableau unique adosse au bloc MTF original.
+var table dash = table.new(tblPos, 4, 9, border_width = 1, border_color = color.new(color.gray, 50))
+if barstate.islast
+    color rowBg = color.new(color.gray, 72)
+    color muted = color.new(color.gray, 40)
+    string verdict = not allAvailable ? "N/A" :
+         fullBull ? "FULL BULL" :
+         fullBear ? "FULL BEAR" :
+         bulls >= 5 ? "Strong Bull" :
+         bears >= 5 ? "Strong Bear" :
+         bulls == bears ? "No Resonance" :
+         net > 0 ? "Lean Bull" : "Lean Bear"
+    color verdictCol = not allAvailable ? muted :
+         bulls >= 5 ? color.teal : bears >= 5 ? color.red : muted
+    string netTxt = (net > 0 ? "+" : "") + str.tostring(net)
+    string qAdxTxt = qReady ? str.tostring(qa, "#.0") : "N/A"
+    string qDmiTxt = qReady ? "+" + str.tostring(qp, "#.0") + " / -" + str.tostring(qm, "#.0") : "N/A"
+    string qErTxt = qReady ? str.tostring(qe, "#.00") : "N/A"
+    string qAtrTxt = qReady ? str.tostring(qv, "#.00") + "x" : "N/A"
+    string qConfirmTxt = not mqUseConfirm ? "OFF" : not cReady or not qReady ? "N/A" : cAgree ? "OK (close)" : "NON / faible"
+    color qConfirmCol = not mqUseConfirm or not cReady or not qReady ? muted : cAgree ? COLOR_NEUTRAL : COLOR_WARNING
+    string chopZone = na(qChop) ? "N/A" : qChop >= chopRangeMin ? "HACHE" : qChop <= chopTrendMax ? "TENDANCE" : "TRANSITION"
+    string qChopTxt = na(qChop) ? "N/A" : str.tostring(qChop, "#.0") + " " + chopZone
+    color chopCol = na(qChop) ? muted : qChop >= chopRangeMin ? COLOR_WARNING : COLOR_NEUTRAL
+    string fastTxt = fastAvailable ? f_sumBias(fastBias) + " (" + str.tostring(fastBull) + "/" + str.tostring(fastBear) + ")" : "N/A"
+    string slowTxt = slowAvailable ? f_sumBias(slowBias) + " (" + str.tostring(slowBull) + "/" + str.tostring(slowBear) + ")" : "N/A"
+
+    table.cell(dash, 0, 0, syminfo.ticker, text_color = color.white, text_size = tblSize, bgcolor = COLOR_HEADER)
+    table.cell(dash, 1, 0, "MTF CLOTURE", text_color = color.white, text_size = tblSize, bgcolor = COLOR_HEADER)
+    table.cell(dash, 2, 0, "QUALITE", text_color = color.white, text_size = tblSize, bgcolor = COLOR_HEADER)
+    table.cell(dash, 3, 0, f_tfLabel(mqTf) + " (close)", text_color = color.white, text_size = tblSize, bgcolor = COLOR_HEADER)
+
+    for i = 0 to 5
+        int state = array.get(states, i)
+        string tf = array.get(tfs, i)
+        table.cell(dash, 0, i + 1, f_tfLabel(tf), text_color = color.white, text_size = tblSize, bgcolor = rowBg)
+        table.cell(dash, 1, i + 1, f_stateTxt(state), text_color = color.white, text_size = tblSize, bgcolor = f_stateCol(state))
+
+    table.cell(dash, 2, 1, "ADX", text_color = color.white, text_size = tblSize, bgcolor = rowBg)
+    table.cell(dash, 3, 1, qAdxTxt, text_color = color.white, text_size = tblSize, bgcolor = rowBg)
+    table.cell(dash, 2, 2, "DMI + / -", text_color = color.white, text_size = tblSize, bgcolor = rowBg)
+    table.cell(dash, 3, 2, qDmiTxt, text_color = color.white, text_size = tblSize, bgcolor = rowBg)
+    table.cell(dash, 2, 3, "Kaufman ER", text_color = color.white, text_size = tblSize, bgcolor = rowBg)
+    table.cell(dash, 3, 3, qErTxt, text_color = color.white, text_size = tblSize, bgcolor = rowBg)
+    table.cell(dash, 2, 4, "ATR relatif", text_color = color.white, text_size = tblSize, bgcolor = rowBg)
+    table.cell(dash, 3, 4, qAtrTxt, text_color = color.white, text_size = tblSize, bgcolor = rowBg)
+    table.cell(dash, 2, 5, "CHOP " + str.tostring(mqChopLen), text_color = color.white, text_size = tblSize, bgcolor = rowBg)
+    table.cell(dash, 3, 5, qChopTxt, text_color = color.white, text_size = tblSize, bgcolor = chopCol)
+    table.cell(dash, 2, 6, "Conf. " + f_tfLabel(mqConfirmTf), text_color = color.white, text_size = tblSize, bgcolor = rowBg)
+    table.cell(dash, 3, 6, qConfirmTxt, text_color = color.white, text_size = tblSize, bgcolor = qConfirmCol)
+
+    table.cell(dash, 0, 7, str.tostring(bulls) + "↑ / " + str.tostring(bears) + "↓", text_color = color.white, text_size = tblSize, bgcolor = muted)
+    table.cell(dash, 1, 7, netTxt, text_color = color.white, text_size = tblSize, bgcolor = muted)
+    table.cell(dash, 2, 7, "TF 1-3", text_color = color.white, text_size = tblSize, bgcolor = rowBg)
+    table.cell(dash, 3, 7, fastTxt, text_color = color.white, text_size = tblSize, bgcolor = fastAvailable ? f_sumBiasColor(fastBias) : muted)
+    table.cell(dash, 0, 8, "Verdict", text_color = color.white, text_size = tblSize, bgcolor = verdictCol)
+    table.cell(dash, 1, 8, verdict, text_color = color.white, text_size = tblSize, bgcolor = verdictCol)
+    table.cell(dash, 2, 8, "TF 4-6", text_color = color.white, text_size = tblSize, bgcolor = rowBg)
+    table.cell(dash, 3, 8, slowTxt, text_color = color.white, text_size = tblSize, bgcolor = slowAvailable ? f_sumBiasColor(slowBias) : muted)
+
+
+// ============================================================================
+// TABLEAU 2 : STRUCTURE & CONFLUENCE - LOLO 2 v1.9
+// Moteur de l'indicateur v1.8, couleurs, seuils et alertes NON MODIFIES.
+// Ce tableau est un FILTRE CONTEXTUEL et non un signal d'entree automatique.
+// Les pivots deviennent connus seulement apres srPivot barres de confirmation.
+// Les donnees 1m / 3m et veille sont prises uniquement sur bougies CLOTUREES.
+// Les "obstacles" sont des references graphiques, PAS des liquidites observees.
+// VWAP remis a zero au changement de JOUR du symbole (inclut l'overnight
+// si le symbole cote hors seance cash). Requiert du volume exploitable.
+// ============================================================================
+
+string SR_GROUP = "Structure & Confluence - Lolo 2"
+bool srShow = input.bool(true, "Afficher le tableau de structure", group = SR_GROUP)
+string srPosInp = input.string("Top Left", "Position du tableau de structure", options = ["Top Left", "Middle Left", "Bottom Left", "Top Center", "Bottom Center"], group = SR_GROUP)
+int srPivot = input.int(3, "Pivot : barres a gauche / droite", minval = 1, maxval = 20, group = SR_GROUP, tooltip = "Un pivot n'est confirme qu'apres N barres supplementaires. Aucun pivot en formation n'est utilise.")
+int srBosRecent1 = input.int(20, "BOS 1m recent (nombre de bougies)", minval = 1, maxval = 300, group = SR_GROUP)
+int srBosRecent3 = input.int(8, "BOS 3m recent (nombre de bougies)", minval = 1, maxval = 100, group = SR_GROUP)
+float srMinRoom = input.float(20.0, "Espace minimum avant reference (points)", minval = 0.0, step = 1.0, group = SR_GROUP, tooltip = "Distance en points de prix, pas en ticks ni en dollars. Une absence de niveau connu ne prouve pas qu'un passage est libre.")
+
+srPos = switch srPosInp
+    "Top Left" => position.top_left
+    "Middle Left" => position.middle_left
+    "Bottom Left" => position.bottom_left
+    "Top Center" => position.top_center
+    => position.bottom_center
+
+// Les references de structure sont construites DANS chaque UT, pas dans le
+// graphique en ticks. Variables persistantes distinctes pour 1m et 3m.
+f_srMetrics() =>
+    float ph = ta.pivothigh(high, srPivot, srPivot)
+    float pl = ta.pivotlow(low, srPivot, srPivot)
+    var float hi = na
+    var float oldHi = na
+    var float lo = na
+    var float oldLo = na
+    var int lastBos = 0
+    var int lastBosIndex = na
+
+    // Test de cassure sur les niveaux DEJA connus avant cette bougie.
+    bool bosUp = not na(hi) and close > hi and close[1] <= hi
+    bool bosDown = not na(lo) and close < lo and close[1] >= lo
+    if bosUp and not bosDown
+        lastBos := 1
+        lastBosIndex := bar_index
+    else if bosDown and not bosUp
+        lastBos := -1
+        lastBosIndex := bar_index
+
+    // Le pivot ne devient disponible qu'a sa confirmation (N barres plus tard).
+    if not na(ph)
+        oldHi := hi
+        hi := ph
+    if not na(pl)
+        oldLo := lo
+        lo := pl
+
+    int structure = na(hi) or na(oldHi) or na(lo) or na(oldLo) ? int(na) :
+         hi > oldHi and lo > oldLo ? 1 : hi < oldHi and lo < oldLo ? -1 : 0
+    int bosAge = na(lastBosIndex) ? int(na) : bar_index - lastBosIndex
+    // Ancrage quotidien explicite : ce n'est PAS un VWAP RTH 09:30-16:00.
+    float dayVwap = ta.vwap(hlc3, timeframe.change("D"))
+    [structure, lastBos, bosAge, hi, lo, close, dayVwap]
+
+f_srClosed() =>
+    [structure, lastBos, bosAge, hi, lo, price, dayVwap] = f_srMetrics()
+    [structure[1], lastBos[1], bosAge[1], hi[1], lo[1], price[1], dayVwap[1]]
+
+// 3 contextes supplementaires; aucun calcul nouveau dans les 6 MTF existantes.
+[srDir1, srBos1, srAge1, srHigh1, srLow1, srPrice1, srVwap1] = request.security(syminfo.tickerid, "1", f_srClosed(), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+[srDir3, srBos3, srAge3, srHigh3, srLow3, srPrice3, srVwap3] = request.security(syminfo.tickerid, "3", f_srClosed(), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+[srPrevHigh, srPrevLow] = request.security(syminfo.tickerid, "D", [high[1], low[1]], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+
+// References les plus proches de la derniere CLOTURE 1m connue.
+// Un niveau deja casse peut encore faire office de reference de retest;
+// il n'est donc PAS presente comme un mur d'ordres reel.
+float srAbove = na
+float srBelow = na
+string srAboveName = ""
+string srBelowName = ""
+array<float> srLevels = array.from(srHigh1, srLow1, srHigh3, srLow3, srPrevHigh, srPrevLow)
+array<string> srNames = array.from("Pivot H 1m", "Pivot B 1m", "Pivot H 3m", "Pivot B 3m", "H veille", "B veille")
+if not na(srPrice1)
+    for i = 0 to array.size(srLevels) - 1
+        float level = array.get(srLevels, i)
+        if not na(level)
+            if level > srPrice1 and (na(srAbove) or level < srAbove)
+                srAbove := level
+                srAboveName := array.get(srNames, i)
+            if level < srPrice1 and (na(srBelow) or level > srBelow)
+                srBelow := level
+                srBelowName := array.get(srNames, i)
+
+float srDistanceUp = na(srAbove) ? na : srAbove - srPrice1
+float srDistanceDown = na(srBelow) ? na : srPrice1 - srBelow
+int srVwapDir = na(srPrice1) or na(srVwap1) ? int(na) : srPrice1 > srVwap1 ? 1 : srPrice1 < srVwap1 ? -1 : 0
+float srVwapGap = na(srPrice1) or na(srVwap1) ? na : srPrice1 - srVwap1
+
+// Un sens MTF n'est propose qu'avec >= 4/6 et au plus 1 opposition.
+int srMtfDir = not allAvailable ? 0 : bulls >= 4 and bears <= 1 ? 1 : bears >= 4 and bulls <= 1 ? -1 : 0
+bool srHasData = allAvailable and qReady and not na(qChop) and not na(srDir1) and not na(srDir3) and not na(srVwapDir) and (not mqUseConfirm or cReady)
+bool srBosRecentUp = (srBos1 == 1 and not na(srAge1) and srAge1 <= srBosRecent1) or (srBos3 == 1 and not na(srAge3) and srAge3 <= srBosRecent3)
+bool srBosRecentDown = (srBos1 == -1 and not na(srAge1) and srAge1 <= srBosRecent1) or (srBos3 == -1 and not na(srAge3) and srAge3 <= srBosRecent3)
+// Une cassure ancienne ne suffit pas : le prix doit encore etre du bon cote
+// du pivot le plus recent de 1m (niveau deja connu au moment de la cassure).
+bool srBosOK = srMtfDir == 1 ? srBosRecentUp and not na(srHigh1) and srPrice1 > srHigh1 :
+     srMtfDir == -1 ? srBosRecentDown and not na(srLow1) and srPrice1 < srLow1 : false
+float srRoom = srMtfDir == 1 ? srDistanceUp : srMtfDir == -1 ? srDistanceDown : na
+bool srRoomOK = not na(srRoom) and srRoom >= srMinRoom
+bool srQualityOK = qDirection == srMtfDir and qa >= mqAdxNoisy and qe >= mqErNoisy and qChop < chopRangeMin and (not mqUseConfirm or cAgree)
+bool srStructureOK = srMtfDir != 0 and srDir1 == srMtfDir and srDir3 == srMtfDir
+bool srVwapOK = srMtfDir != 0 and srVwapDir == srMtfDir
+bool srOpposed = srMtfDir != 0 and ((srDir1 != 0 and srDir1 != srMtfDir) or (srDir3 != 0 and srDir3 != srMtfDir) or (srVwapDir != 0 and srVwapDir != srMtfDir))
+bool srConfluence = srHasData and srMtfDir != 0 and srQualityOK and srStructureOK and srVwapOK and srBosOK and srRoomOK
+
+f_srDirection(int dir) =>
+    na(dir) ? "N/A" : dir == 1 ? "HH + HL ▲" : dir == -1 ? "LH + LL ▼" : "MIXTE"
+
+f_srDirColor(int dir) =>
+    na(dir) ? COLOR_NEUTRAL : dir == 1 ? color.teal : dir == -1 ? color.red : COLOR_NEUTRAL
+
+f_srBosText(int bos, int age, int maximum) =>
+    na(age) or age > maximum ? "AUCUN RECENT" : (bos == 1 ? "BOS ▲ " : bos == -1 ? "BOS ▼ " : "AUCUN") + str.tostring(age) + "b"
+
+f_srBosColor(int bos, int age, int maximum) =>
+    na(age) or age > maximum ? COLOR_NEUTRAL : bos == 1 ? color.teal : bos == -1 ? color.red : COLOR_NEUTRAL
+
+f_srObstacle(float distance, string source) =>
+    na(distance) ? "N/A (inconnu)" : str.tostring(distance, "#.0") + " pt - " + source
+
+var table srTable = table.new(srPos, 2, 11, border_width = 1, border_color = color.new(color.gray, 50))
+if barstate.islast and srShow
+    color srBg = color.new(color.gray, 72)
+    color srMuted = color.new(color.gray, 40)
+    string vwTxt = na(srVwapDir) ? "N/A (volume)" : srVwapDir == 1 ? "AU-DESSUS +" + str.tostring(srVwapGap, "#.0") + " pt" : srVwapDir == -1 ? "EN-DESSOUS " + str.tostring(srVwapGap, "#.0") + " pt" : "SUR VWAP"
+    string srVerdict = not srHasData ? "N/A" : srConfluence ? (srMtfDir == 1 ? "CONFLUENCE ▲" : "CONFLUENCE ▼") : srOpposed ? "CONTRADICTION" : "PARTIELLE"
+    color srVerdictColor = not srHasData ? srMuted : srConfluence ? (srMtfDir == 1 ? color.teal : color.red) : COLOR_WARNING
+    string srWhy = not srHasData ? "Prechauffage / volume" : srMtfDir == 0 ? "MTF non tranche" : srOpposed ? "Structure / VWAP oppose" : not srQualityOK ? "Qualite / CHOP / confirm." : not srStructureOK ? "Structure inachevee" : not srVwapOK ? "VWAP non aligne" : not srBosOK ? "BOS non confirme/recent" : not srRoomOK ? "Obstacle proche/inconnu" : "Crit. reunis (filtre)"
+    string srRoomText = srMtfDir == 0 ? "SENS NON DEFINI" : na(srRoom) ? "N/A" : (srMtfDir == 1 ? "ACHAT " : "VENTE ") + str.tostring(srRoom, "#.0") + " pt"
+
+    table.cell(srTable, 0, 0, "STRUCTURE", text_color = color.white, text_size = tblSize, bgcolor = COLOR_HEADER)
+    table.cell(srTable, 1, 0, "CONFLUENCE (CLOSE)", text_color = color.white, text_size = tblSize, bgcolor = COLOR_HEADER)
+    table.cell(srTable, 0, 1, "Structure 1m", text_color = color.white, text_size = tblSize, bgcolor = srBg)
+    table.cell(srTable, 1, 1, f_srDirection(srDir1), text_color = color.white, text_size = tblSize, bgcolor = f_srDirColor(srDir1))
+    table.cell(srTable, 0, 2, "Structure 3m", text_color = color.white, text_size = tblSize, bgcolor = srBg)
+    table.cell(srTable, 1, 2, f_srDirection(srDir3), text_color = color.white, text_size = tblSize, bgcolor = f_srDirColor(srDir3))
+    table.cell(srTable, 0, 3, "Dernier BOS 1m", text_color = color.white, text_size = tblSize, bgcolor = srBg)
+    table.cell(srTable, 1, 3, f_srBosText(srBos1, srAge1, srBosRecent1), text_color = color.white, text_size = tblSize, bgcolor = f_srBosColor(srBos1, srAge1, srBosRecent1))
+    table.cell(srTable, 0, 4, "Dernier BOS 3m", text_color = color.white, text_size = tblSize, bgcolor = srBg)
+    table.cell(srTable, 1, 4, f_srBosText(srBos3, srAge3, srBosRecent3), text_color = color.white, text_size = tblSize, bgcolor = f_srBosColor(srBos3, srAge3, srBosRecent3))
+    table.cell(srTable, 0, 5, "VWAP jour", text_color = color.white, text_size = tblSize, bgcolor = srBg)
+    table.cell(srTable, 1, 5, vwTxt, text_color = color.white, text_size = tblSize, bgcolor = na(srVwapDir) ? srMuted : srVwapDir == 1 ? color.teal : srVwapDir == -1 ? color.red : srMuted)
+    table.cell(srTable, 0, 6, "Ref. au-dessus", text_color = color.white, text_size = tblSize, bgcolor = srBg)
+    table.cell(srTable, 1, 6, f_srObstacle(srDistanceUp, srAboveName), text_color = color.white, text_size = tblSize, bgcolor = srMuted)
+    table.cell(srTable, 0, 7, "Ref. en-dessous", text_color = color.white, text_size = tblSize, bgcolor = srBg)
+    table.cell(srTable, 1, 7, f_srObstacle(srDistanceDown, srBelowName), text_color = color.white, text_size = tblSize, bgcolor = srMuted)
+    table.cell(srTable, 0, 8, "Espace sens MTF", text_color = color.white, text_size = tblSize, bgcolor = srBg)
+    table.cell(srTable, 1, 8, srRoomText, text_color = color.white, text_size = tblSize, bgcolor = not na(srRoom) and srRoom < srMinRoom ? COLOR_WARNING : srMuted)
+    table.cell(srTable, 0, 9, "Confluence", text_color = color.white, text_size = tblSize, bgcolor = srVerdictColor)
+    table.cell(srTable, 1, 9, srVerdict, text_color = color.white, text_size = tblSize, bgcolor = srVerdictColor)
+    table.cell(srTable, 0, 10, "Explication", text_color = color.white, text_size = tblSize, bgcolor = srBg)
+    table.cell(srTable, 1, 10, srWhy, text_color = color.white, text_size = tblSize, bgcolor = srMuted)
